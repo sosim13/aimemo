@@ -33,40 +33,7 @@ class LlmModelInfo {
   });
 }
 
-/// Predefined list of models available for download
-const kPredefinedModels = <LlmModelInfo>[
-  LlmModelInfo(
-    name: 'gemma2:2b',
-    displayName: 'Gemma 2 2B',
-    description: '가장 가벼운 모델, 저사양 기기나 빠른 응답이 필요할 때',
-    sizeLabel: '~1.6GB',
-  ),
-  LlmModelInfo(
-    name: 'gemma2:9b',
-    displayName: 'Gemma 2 9B',
-    description: '균형 잡힌 성능과 속도, 일반적인 요약 작업에 적합',
-    sizeLabel: '~5.5GB',
-  ),
-  LlmModelInfo(
-    name: 'gemma4:e2b',
-    displayName: 'Gemma 4 E2B',
-    description: '최신 모바일 최적화 모델, 뛰어난 효율성 (권장)',
-    sizeLabel: '~7.2GB',
-    isRecommended: true,
-  ),
-  LlmModelInfo(
-    name: 'gemma4:e4b',
-    displayName: 'Gemma 4 E4B',
-    description: '고성능 온디바이스 모델, 더 깊이 있는 분석 가능',
-    sizeLabel: '~9.5GB',
-  ),
-  LlmModelInfo(
-    name: 'gemma4',
-    displayName: 'Gemma 4 (26B A4B)',
-    description: '최고 품질 요약, 충분한 GPU 메모리 필요',
-    sizeLabel: '~15GB',
-  ),
-];
+
 
 /// Status of a model on the server
 class ModelStatus {
@@ -85,7 +52,7 @@ class ModelStatus {
   });
 }
 
-/// Abstract interface for LLM providers (Ollama, NVIDIA, etc.)
+/// Abstract interface for LLM providers
 abstract class LlmProvider {
   /// Human-readable provider name
   String get name;
