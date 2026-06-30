@@ -18,10 +18,10 @@ dependencies:
   sqflite: ^2.4.1
   path: ^1.9.1
 
-  # Secure storage for API keys
+  # Secure storage for settings
   flutter_secure_storage: ^9.2.4
 
-  # HTTP client
+  # HTTP client (for web page fetching, YouTube API, etc.)
   http: ^1.3.0
 
   # URL launcher
