@@ -427,7 +427,7 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: Text(
-              '설정 메뉴에서 Ollama 서버 연결 또는 NVIDIA API 키를 확인해주세요.',
+              '설정 메뉴에서 Gemma 모델을 다운로드하거나 엔진을 초기화해주세요.',
               style: TextStyle(color: Colors.orange[700], fontSize: 12),
             ),
           ),

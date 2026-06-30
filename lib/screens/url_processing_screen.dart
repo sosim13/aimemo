@@ -92,7 +92,7 @@ class _UrlProcessingScreenState extends State<UrlProcessingScreen> {
           _status = 'AI 모델을 사용할 수 없습니다.';
           _hasError = true;
           _errorMessage =
-              '설정 메뉴에서 Ollama 서버 주소를 확인하거나 NVIDIA API 키를 입력해주세요.';
+              '설정 메뉴에서 Gemma 모델을 다운로드하거나 엔진을 초기화해주세요.';
           _isProcessing = false;
         });
         return;
