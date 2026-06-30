@@ -270,12 +270,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openMemoDetail(Memo memo) async {
-    final result = await Navigator.push(
+    await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => MemoDetailScreen(memoId: memo.id!)),
     );
-    if (result == true) {
-      await _loadMemos();
-    }
+    await _loadMemos();
   }
 }
