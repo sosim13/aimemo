@@ -1,15 +1,19 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/memo.dart';
 import '../services/database_service.dart';
 import '../services/llm_service.dart';
 import '../services/native_share_service.dart';
+import '../services/content_processing_service.dart';
+import '../services/background_queue_service.dart';
+import '../services/shared_content_parser.dart';
 import '../widgets/memo_card.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/category_chip.dart';
 import 'settings_screen.dart';
 import 'memo_input_screen.dart';
 import 'memo_detail_screen.dart';
-import 'url_processing_screen.dart';
+
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -21,24 +25,42 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _databaseService = DatabaseService();
   final _llmService = LlmService();
+  final _processingService = ContentProcessingService();
+  final _backgroundQueue = BackgroundQueueService();
 
   List<Memo> _memos = [];
   Map<String, int> _categoryCounts = {};
   String? _selectedCategory;
   bool _isLoading = true;
   bool _isAiAvailable = false;
+  StreamSubscription<ProcessingResult>? _processingSubscription;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initialize();
-    _checkSharedContent();
+
+    // Listen for background processing results to refresh UI
+    _processingSubscription = _processingService.onItemProcessed.listen((result) {
+      if (!mounted) return;
+      _loadMemos();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result.success
+              ? '✅ 메모가 저장되었습니다'
+              : '❌ 처리 실패: ${result.error ?? "알 수 없는 오류"}'),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _processingSubscription?.cancel();
     super.dispose();
   }
 
@@ -46,6 +68,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _checkSharedContent();
+      _loadMemos();  // 백그라운드에서 처리된 메모 반영
     }
   }
 
@@ -57,29 +80,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _checkSharedContent() async {
     final sharedText = await NativeShareService.getSharedText();
     if (sharedText != null && sharedText.isNotEmpty && mounted) {
-      _handleSharedText(sharedText);
+      await _handleSharedText(sharedText);
     }
   }
 
-  void _handleSharedText(String text) {
-    // Check if it's a URL
-    final isUrl = text.startsWith('http://') || text.startsWith('https://');
-    if (isUrl) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => UrlProcessingScreen(sharedUrl: text),
-        ),
-      ).then((_) => _loadMemos());
-    } else {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => MemoInputScreen(
-            initialContent: text,
+  Future<void> _handleSharedText(String text) async {
+    final items = SharedContentParser.parse(text);
+    await _backgroundQueue.enqueueItems(items);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            items.length > 1
+                ? '${items.length}개 링크를 큐에 추가했습니다.'
+                : '백그라운드에서 요약 중입니다.',
           ),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 2),
         ),
-      ).then((_) => _loadMemos());
+      );
     }
   }
 
@@ -251,7 +271,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openSettings() async {
-    final result = await Navigator.push(
+    await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const SettingsScreen()),
     );
@@ -260,11 +280,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openMemoInput() async {
-    final result = await Navigator.push(
+    await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const MemoInputScreen()),
     );
-    if (result == true) {
+    if (mounted) {
       await _loadMemos();
     }
   }

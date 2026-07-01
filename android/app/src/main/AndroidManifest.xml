@@ -1,5 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     
     <application
         android:label="Aimemo"
@@ -25,13 +28,6 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
 
-            <!-- Share intent filter: Receive text shares (YouTube URLs) -->
-            <intent-filter>
-                <action android:name="android.intent.action.SEND"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-                <data android:mimeType="text/plain"/>
-            </intent-filter>
-
             <!-- View intent filter: Open HTTP/HTTPS URLs directly -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
@@ -41,6 +37,24 @@
                 <data android:scheme="https"/>
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ShareReceiverActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/NoDisplayTheme">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/plain"/>
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".AimemoBackgroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"/>
         
         <meta-data
             android:name="flutterEmbedding"

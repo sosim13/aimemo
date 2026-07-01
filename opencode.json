@@ -1,0 +1,4 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "qwen/qwen-2.5-coder-32b-instruct"
+}

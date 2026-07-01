@@ -1,16 +1,16 @@
-import 'package:flutter/material.dart';
 import 'dart:io';
+
+import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
+
 import '../models/memo.dart';
+import '../services/background_queue_service.dart';
 import '../services/database_service.dart';
-import '../services/ai_service.dart';
 import '../services/llm_service.dart';
+import '../services/shared_content_parser.dart';
+import '../services/tiktok_service.dart';
 import '../services/url_handler_service.dart';
 import '../services/youtube_service.dart';
-import '../services/tiktok_service.dart';
-import '../services/web_page_service.dart';
-import '../services/debug_logger.dart';
-import '../services/category_detector.dart';
 
 class MemoInputScreen extends StatefulWidget {
   final String? initialUrl;
@@ -30,13 +30,19 @@ class MemoInputScreen extends StatefulWidget {
 
 class _MemoInputScreenState extends State<MemoInputScreen> {
   final _contentController = TextEditingController();
+  final _titleController = TextEditingController();
+  final _categoryController = TextEditingController();
+  final _urlController = TextEditingController();
   final _databaseService = DatabaseService();
-  final _aiService = AiService();
   final _llmService = LlmService();
   final _urlHandler = UrlHandlerService();
   final _youtubeService = YouTubeService();
   final _tiktokService = TikTokService();
-  final _debug = DebugLogger();
+  final _backgroundQueue = BackgroundQueueService();
+
+  bool _isAiAvailable = false;
+  bool _manualMode = false;
+  bool _isSubmitting = false;
 
   /// Direct file fallback logger — bypasses DebugLogger entirely.
   /// Auto-truncates to 300 lines to prevent unbounded growth.
@@ -66,14 +72,40 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
     } catch (_) {}
   }
 
-  bool _isAnalyzing = false;
-  bool _isAiAvailable = false;
-  bool _manualMode = false;
+  /// Check if [text] looks like a general web page URL (not YouTube/TikTok)
+  bool _isWebUrl(String text) {
+    final uri = Uri.tryParse(text.trim());
+    if (uri == null) return false;
+    // Must have a scheme (http/https) and a host with a dot (e.g. m.10000recipe.com)
+    if (uri.scheme != 'http' && uri.scheme != 'https') return false;
+    if (uri.host.isEmpty) return false;
+    if (!uri.host.contains('.')) return false;
+    // Exclude already-handled types
+    if (_youtubeService.isYouTubeUrl(text)) return false;
+    if (_tiktokService.isTikTokUrl(text)) return false;
+    return true;
+  }
 
-  // Manual input fields
-  final _titleController = TextEditingController();
-  final _categoryController = TextEditingController();
-  final _urlController = TextEditingController();
+  void _showSnackBar(String message, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            Icon(
+              isError ? Icons.error_outline : Icons.auto_awesome,
+              color: Colors.white,
+              size: 18,
+            ),
+            const SizedBox(width: 8),
+            Expanded(child: Text(message)),
+          ],
+        ),
+        backgroundColor: isError ? Colors.red[600] : Colors.green[600],
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
 
   @override
   void initState() {
@@ -83,173 +115,52 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
 
   Future<void> _initialize() async {
     final available = await _llmService.isAvailable();
-    if (mounted) {
-      setState(() => _isAiAvailable = available);
-    }
-
     if (widget.initialUrl != null) {
       _urlController.text = widget.initialUrl!;
     }
     if (widget.initialContent != null) {
       _contentController.text = widget.initialContent!;
     }
+    if (mounted) {
+      setState(() => _isAiAvailable = available);
+    }
 
-    // If URL was shared, auto-analyze after short delay
-    if (widget.initialUrl != null && _isAiAvailable) {
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (mounted) _analyzeWithAI();
-      });
+    if (widget.initialUrl != null && available) {
+      await _analyzeWithAI();
     }
   }
 
   Future<void> _analyzeWithAI() async {
-    await _diag('analyzeWithAI ENTER');
     if (!_isAiAvailable) {
       _showSnackBar('설정에서 AI 모델 제공자를 확인해주세요.', isError: true);
       return;
     }
 
     final content = _contentController.text.trim();
-    if (content.isEmpty && widget.initialUrl == null) {
+    final url = widget.initialUrl ?? _urlController.text.trim();
+    if (content.isEmpty && url.isEmpty) {
       _showSnackBar('분석할 내용을 입력해주세요.', isError: true);
       return;
     }
 
-    setState(() => _isAnalyzing = true);
+    setState(() => _isSubmitting = true);
 
-    // Variables shared between try and catch blocks
-    var sourceUrl = widget.initialUrl ?? _urlController.text.trim();
-    var videoId = widget.youtubeVideoId;
-    String analysisContent = content;
-
-    try {
-      // If no URL from URL field, check if content itself looks like a URL
-      if (sourceUrl.isEmpty && Uri.tryParse(content)?.hasScheme == true) {
-        sourceUrl = content;
-      }
-
-      analysisContent = content;
-      await _diag('sourceUrl=$sourceUrl analysisContent.length=${analysisContent.length}');
-
-      // If we have a URL, try to fetch content from it
-      if (sourceUrl.isNotEmpty) {
-        // 1. Try YouTube
-        final candidateVideoId = videoId ?? _youtubeService.extractVideoId(sourceUrl);
-        if (candidateVideoId != null) {
-          setState(() => _isAnalyzing = true);
-          videoId = candidateVideoId;
-          await _diag('YouTube video detected: $candidateVideoId');
-
-          final videoInfo = await _youtubeService.getVideoInfo(candidateVideoId);
-          if (videoInfo != null) {
-            final transcript =
-                await _youtubeService.fetchTranscript(candidateVideoId);
-            final videoInfoWithTranscript = YouTubeVideoInfo(
-              videoId: videoInfo.videoId,
-              title: videoInfo.title,
-              description: videoInfo.description,
-              thumbnailUrl: videoInfo.thumbnailUrl,
-              channelName: videoInfo.channelName,
-              transcript: transcript,
-            );
-            analysisContent = videoInfoWithTranscript.buildContentForAi();
-          }
-        }
-        // 2. Try TikTok
-        else if (_tiktokService.isTikTokUrl(sourceUrl)) {
-          setState(() => _isAnalyzing = true);
-
-          final tiktokInfo = await _tiktokService.getVideoInfo(sourceUrl);
-          if (tiktokInfo != null) {
-            analysisContent = tiktokInfo.buildContentForAi();
-          }
-        }
-        // 3. Try general web page
-        else if (_isWebUrl(sourceUrl)) {
-          setState(() => _isAnalyzing = true);
-          await _diag('Fetching web page: $sourceUrl');
-
-          final webService = WebPageService();
-          final pageInfo = await webService.fetchPageContent(sourceUrl);
-          await _diag('WebPage fetch result: ${pageInfo != null ? "title=${pageInfo.title} textLen=${pageInfo.textContent.length}" : "null"}');
-          if (pageInfo != null) {
-            final pageTitle = pageInfo.title.isNotEmpty ? '[${pageInfo.title}]' : '';
-            final pageDesc = pageInfo.description.isNotEmpty ? pageInfo.description : '';
-            final pageBody = pageInfo.textContent.isNotEmpty ? '\n\n${pageInfo.textContent}' : '';
-            final combined = '$pageTitle $pageDesc$pageBody'.trim();
-            if (combined.isNotEmpty) {
-              analysisContent = combined;
-            }
-          }
-        }
-      }
-
-      await _diag('Calling AI analyze, content length=${analysisContent.length}');
-      final result = await _aiService.analyzeContent(
-        content: analysisContent,
-        sourceUrl: sourceUrl.isNotEmpty ? sourceUrl : null,
-        youtubeVideoId: videoId,
-      );
-
-      if (mounted) {
-        // Save the memo
-        final memo = Memo(
-          title: result.title.isNotEmpty ? result.title : '제목 없음',
-          content: result.content.isNotEmpty ? result.content : content,
-          category: result.category.isNotEmpty ? result.category : '기타',
-          sourceUrl: result.sourceUrl ?? (sourceUrl.isNotEmpty ? sourceUrl : null),
-          youtubeVideoId: result.youtubeVideoId ?? videoId,
-        );
-
-        await _databaseService.insertMemo(memo);
-        await _diag('Memo saved via AI, title="${result.title}" category="${result.category}" contentLen=${result.content.length}');
-
-        setState(() => _isAnalyzing = false);
-        _showSnackBar('✅ 메모가 저장되었습니다.');
-        Navigator.pop(context, true);
-      }
-    } catch (e) {
-      await _debug.log('MIS: AI analysis exception: $e');
-      await _diag('AI exception: $e');
-
-      // Fallback: save memo with what we have
-      String fallbackTitle = '';
-      String fallbackContent = content;
-      String fallbackCategory = '기타';
-
-      // Extract title from analysisContent if it was fetched from URL
-      if (sourceUrl.isNotEmpty && analysisContent != content) {
-        final titleMatch =
-            RegExp(r'^\[(.+?)\]', caseSensitive: false).firstMatch(analysisContent);
-        if (titleMatch != null) {
-          fallbackTitle = titleMatch.group(1)!.trim();
-        }
-        // Truncate content
-        if (analysisContent.length > 500) {
-          fallbackContent =
-              '${analysisContent.substring(0, 500)}\n\n📌 AI 요약에 실패했습니다. 원본 내용 중 일부를 표시합니다.';
-        } else {
-          fallbackContent = analysisContent;
-        }
-        fallbackCategory = CategoryDetector.detect(analysisContent) ?? '기타';
-      }
-
-      if (mounted) {
-        final memo = Memo(
-          title: fallbackTitle.isNotEmpty ? fallbackTitle : (sourceUrl.isNotEmpty ? sourceUrl : '제목 없음'),
-          content: fallbackContent,
-          category: fallbackCategory,
-          sourceUrl: sourceUrl.isNotEmpty ? sourceUrl : null,
-          youtubeVideoId: videoId,
-        );
-        await _databaseService.insertMemo(memo);
-        await _debug.log('MIS: Fallback memo saved (category=$fallbackCategory)');
-        await _diag('Fallback memo saved, category=$fallbackCategory');
-        setState(() => _isAnalyzing = false);
-        _showSnackBar('✅ 메모가 저장되었습니다 (AI 요약 생략).');
-        Navigator.pop(context, true);
-      }
+    final items = <BackgroundQueueItem>[];
+    if (url.isNotEmpty) {
+      items.addAll(SharedContentParser.parse(url));
+    } else if (content.isNotEmpty) {
+      items.add(BackgroundQueueItem(
+        content: content,
+        type: BackgroundQueueType.text,
+      ));
     }
+
+    await _backgroundQueue.enqueueItems(items);
+
+    if (!mounted) return;
+    setState(() => _isSubmitting = false);
+    _showSnackBar('AI 요약중입니다');
+    Navigator.pop(context, true);
   }
 
   Future<void> _saveManual() async {
@@ -269,42 +180,17 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
 
     final videoId = url.isNotEmpty ? _urlHandler.parseUrl(url).youtubeVideoId : null;
 
-    final memo = Memo(
+    await _databaseService.insertMemo(Memo(
       title: title,
       content: content,
       category: category.isNotEmpty ? category : '기타',
       sourceUrl: url.isNotEmpty ? url : null,
       youtubeVideoId: videoId,
-    );
+    ));
 
-    await _databaseService.insertMemo(memo);
-    _showSnackBar('✅ 메모가 저장되었습니다.');
-    Navigator.pop(context, true);
-  }
-
-  /// Check if [text] looks like a general web page URL (not YouTube/TikTok)
-  bool _isWebUrl(String text) {
-    final uri = Uri.tryParse(text.trim());
-    if (uri == null) return false;
-    // Must have a scheme (http/https) and a host with a dot (e.g. m.10000recipe.com)
-    if (uri.scheme != 'http' && uri.scheme != 'https') return false;
-    if (uri.host.isEmpty) return false;
-    if (!uri.host.contains('.')) return false;
-    // Exclude already-handled types
-    if (_youtubeService.isYouTubeUrl(text)) return false;
-    if (_tiktokService.isTikTokUrl(text)) return false;
-    return true;
-  }
-
-  void _showSnackBar(String message, {bool isError = false}) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: isError ? Colors.red[600] : Colors.green[600],
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    _showSnackBar('메모가 저장되었습니다.');
+    Navigator.pop(context, true);
   }
 
   @override
@@ -324,37 +210,21 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
           TextButton(
-            onPressed: () {
-              setState(() => _manualMode = !_manualMode);
-            },
+            onPressed: _isSubmitting
+                ? null
+                : () => setState(() => _manualMode = !_manualMode),
             child: Text(_manualMode ? 'AI 모드' : '직접 입력'),
           ),
         ],
       ),
-      body: _isAnalyzing
-          ? const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text('AI가 내용을 분석하고 있습니다...'),
-                  SizedBox(height: 8),
-                  Text(
-                    '잠시만 기다려주세요',
-                    style: TextStyle(color: Colors.grey, fontSize: 13),
-                  ),
-                ],
-              ),
-            )
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: _manualMode ? _buildManualForm() : _buildAiForm(),
-            ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: _manualMode ? buildManualForm() : buildAiForm(),
+      ),
     );
   }
 
-  Widget _buildAiForm() {
+  Widget buildAiForm() {
     final hasUrl = widget.initialUrl != null;
 
     return Column(
@@ -363,8 +233,7 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
         if (hasUrl) ...[
           Card(
             color: Colors.blue[50],
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             child: Padding(
               padding: const EdgeInsets.all(12),
               child: Row(
@@ -397,8 +266,8 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
           maxLines: 8,
           decoration: InputDecoration(
             hintText: hasUrl
-                ? 'URL 내용을 분석 중입니다... (추가 입력 가능)'
-                : '메모할 내용을 입력하세요.\n예: 순두부찌개 레시피 - 재료: 순두부 100g, 고춧가루 2숟가락...',
+                ? 'URL과 함께 추가로 요약할 내용을 입력할 수 있습니다.'
+                : '메모할 내용이나 URL을 입력하세요.',
             border: const OutlineInputBorder(),
             alignLabelWithHint: true,
           ),
@@ -418,8 +287,14 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
           width: double.infinity,
           height: 48,
           child: FilledButton.icon(
-            onPressed: _isAiAvailable ? _analyzeWithAI : null,
-            icon: const Icon(Icons.auto_awesome),
+            onPressed: _isAiAvailable && !_isSubmitting ? _analyzeWithAI : null,
+            icon: _isSubmitting
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.auto_awesome),
             label: Text(_isAiAvailable ? 'AI 분석 및 저장' : 'AI 연결 필요'),
           ),
         ),
@@ -435,7 +310,7 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
     );
   }
 
-  Widget _buildManualForm() {
+  Widget buildManualForm() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [

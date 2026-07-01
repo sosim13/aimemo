@@ -4,6 +4,8 @@ import 'package:flutter_gemma_litertlm/flutter_gemma_litertlm.dart';
 import 'services/database_service.dart';
 import 'services/llm_service.dart';
 import 'services/debug_logger.dart';
+import 'services/background_queue_service.dart';
+import 'services/content_processing_service.dart';
 import 'screens/home_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/memo_input_screen.dart';
@@ -30,6 +32,99 @@ void main() async {
   await LlmService().init();
 
   runApp(const AimemoApp());
+}
+
+@pragma('vm:entry-point')
+Future<void> backgroundMain() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // ---------------------------------------------------------------------------
+  // 1. 초기화 — 각 단계 실패 시 AI 없이 fallback 저장 모드로 진행
+  // ---------------------------------------------------------------------------
+  try {
+    await DebugLogger().init();
+  } catch (_) {}
+
+  var aiAvailable = true;
+
+  // FlutterGemma: on-device AI 엔진. secondary engine에서 실패할 수 있으므로
+  // 실패해도 치명적이지 않음 — AI 없이 원본 저장만 하면 됨.
+  try {
+    await FlutterGemma.initialize(
+      inferenceEngines: [LiteRtLmEngine()],
+    );
+  } catch (e) {
+    // ignore: avoid_print
+    print('[backgroundMain] FlutterGemma 초기화 실패 (AI 없이 진행): $e');
+    aiAvailable = false;
+  }
+
+  // Database: 실패 시 저장소를 사용할 수 없으므로 여기서 중단
+  try {
+    await DatabaseService().database;
+  } catch (e) {
+    // ignore: avoid_print
+    print('[backgroundMain] DB 초기화 실패 (처리 불가): $e');
+    return;
+  }
+
+  try {
+    await LlmService().init();
+  } catch (e) {
+    // ignore: avoid_print
+    print('[backgroundMain] LlmService 초기화 실패 (AI 없이 진행): $e');
+    aiAvailable = false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2. 큐에 쌓인 아이템을 순차 처리
+  // ---------------------------------------------------------------------------
+  final queue = BackgroundQueueService();
+  final processor = ContentProcessingService();
+
+  try {
+    while (true) {
+      final items = await queue.getPendingItems();
+      if (items.isEmpty) break;
+
+      for (final item in items) {
+        // 각 아이템을 개별 try-catch로 감싸서 한 건 실패해도 나머지 계속 처리
+        try {
+          final result = await processor.processItem(
+            ProcessingItem(
+              content: item.content,
+              type: item.type == BackgroundQueueType.url
+                  ? ContentType.url
+                  : ContentType.text,
+              fallbackTitle:
+                  item.type == BackgroundQueueType.text ? '공유된 내용' : null,
+            ),
+          );
+
+          await queue.markComplete(item.id);
+          await queue.notifyComplete(
+            title: result.title ?? item.content,
+            success: result.success,
+            error: result.error,
+          );
+        } catch (e) {
+          // processor.processItem() 자체가 예상치 못하게 던진 경우
+          await queue.markComplete(item.id);
+          await queue.notifyComplete(
+            title: item.content,
+            success: false,
+            error: '처리 중 오류: $e',
+          );
+        }
+      }
+    }
+  } catch (e) {
+    // while/for 루프 자체가 깨진 경우 — 최소한 알림이라도 전송
+    // ignore: avoid_print
+    print('[backgroundMain] 처리 루프 중단: $e');
+  } finally {
+    await queue.stopServiceIfIdle();
+  }
 }
 
 class AimemoApp extends StatelessWidget {
