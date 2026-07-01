@@ -22,6 +22,14 @@ android {
         versionName = flutter.versionName
     }
 
+    // ML Kit: auto-download Korean OCR model on first use
+    // https://developers.google.com/ml-kit/vision/text-recognition/v2/android
+    bundle {
+        language {
+            enableSplit = false
+        }
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.
@@ -29,6 +37,12 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+}
+
+dependencies {
+    // ML Kit Text Recognition v2 (Korean-optimized model)
+    // Automatically downloads Korean recognition model on first use (~30MB)
+    implementation("com.google.mlkit:text-recognition-korean:16.0.1")
 }
 
 flutter {

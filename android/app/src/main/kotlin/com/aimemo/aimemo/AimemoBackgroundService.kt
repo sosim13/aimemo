@@ -7,8 +7,13 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
 import io.flutter.FlutterInjector
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.dart.DartExecutor
@@ -88,8 +93,59 @@ class AimemoBackgroundService : Service() {
                     }
                     result.success(null)
                 }
+                "performOcr" -> {
+                    val imageUri = call.argument<String>("imageUri")
+                    if (imageUri == null) {
+                        result.error("INVALID_ARGUMENT", "imageUri is required", null)
+                        return@setMethodCallHandler
+                    }
+                    performOcr(imageUri, result)
+                }
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    /// Run ML Kit OCR on the image at the given content URI.
+    /// Returns a map with:
+    ///   - text: recognized text (empty string if none)
+    ///   - hasText: whether any text was found
+    private fun performOcr(imageUri: String, result: MethodChannel.Result) {
+        try {
+            val uri = Uri.parse(imageUri)
+            val inputStream = contentResolver.openInputStream(uri)
+                ?: run {
+                    result.error("IO_ERROR", "Cannot open image URI: $imageUri", null)
+                    return
+                }
+
+            val bitmap = BitmapFactory.decodeStream(inputStream)
+            inputStream.close()
+
+            if (bitmap == null) {
+                result.error("IO_ERROR", "Failed to decode bitmap from URI: $imageUri", null)
+                return
+            }
+
+            val image = InputImage.fromBitmap(bitmap, 0)
+            val recognizer = TextRecognition.getClient(KoreanTextRecognizerOptions.Builder().build())
+
+            recognizer.process(image)
+                .addOnSuccessListener { visionText ->
+                    val recognizedText = visionText.text.trim()
+                    val response = mapOf(
+                        "text" to recognizedText,
+                        "hasText" to (recognizedText.isNotEmpty()),
+                    )
+                    result.success(response)
+                    recognizer.close()
+                }
+                .addOnFailureListener { e ->
+                    result.error("OCR_FAILED", "OCR processing failed: ${e.message}", null)
+                    recognizer.close()
+                }
+        } catch (e: Exception) {
+            result.error("OCR_ERROR", "OCR error: ${e.message}", null)
         }
     }
 

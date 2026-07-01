@@ -90,14 +90,23 @@ Future<void> backgroundMain() async {
       for (final item in items) {
         // 각 아이템을 개별 try-catch로 감싸서 한 건 실패해도 나머지 계속 처리
         try {
+          final contentType = switch (item.type) {
+            BackgroundQueueType.url => ContentType.url,
+            BackgroundQueueType.image => ContentType.image,
+            BackgroundQueueType.text => ContentType.text,
+          };
+
+          final fallbackTitle = switch (item.type) {
+            BackgroundQueueType.text => '공유된 내용',
+            BackgroundQueueType.image => '이미지 메모',
+            BackgroundQueueType.url => null,
+          };
+
           final result = await processor.processItem(
             ProcessingItem(
               content: item.content,
-              type: item.type == BackgroundQueueType.url
-                  ? ContentType.url
-                  : ContentType.text,
-              fallbackTitle:
-                  item.type == BackgroundQueueType.text ? '공유된 내용' : null,
+              type: contentType,
+              fallbackTitle: fallbackTitle,
             ),
           );
 

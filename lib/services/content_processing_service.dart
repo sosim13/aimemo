@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/memo.dart';
+import 'background_queue_service.dart';
 import 'database_service.dart';
 import 'llm_service.dart';
 import 'ai_service.dart';
@@ -14,7 +15,7 @@ import 'category_detector.dart';
 import 'debug_logger.dart';
 
 /// Type of content to process
-enum ContentType { url, text }
+enum ContentType { url, text, image }
 
 /// An item waiting to be processed
 class ProcessingItem {
@@ -91,9 +92,11 @@ class ContentProcessingService {
 
   Future<ProcessingResult> processItem(ProcessingItem item) async {
     try {
-      final title = item.type == ContentType.url
-          ? await _processUrl(item.content)
-          : await _processText(item);
+      final title = switch (item.type) {
+        ContentType.url => await _processUrl(item.content),
+        ContentType.image => await _processImage(item.content),
+        ContentType.text => await _processText(item),
+      };
       final result = ProcessingResult(success: true, title: title);
       _resultController.add(result);
       return result;
@@ -379,6 +382,54 @@ class ContentProcessingService {
       ));
       return item.fallbackTitle ?? '메모';
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Image processing (OCR via native ML Kit)
+  // ---------------------------------------------------------------------------
+
+  Future<String> _processImage(String imageUri) async {
+    await _debug.log('CPS: Processing image: $imageUri');
+
+    final queue = BackgroundQueueService();
+    final ocrText = await queue.performOcr(imageUri);
+
+    if (ocrText != null && ocrText.isNotEmpty) {
+      await _debug.log('CPS: OCR found text (${ocrText.length} chars)');
+
+      if (await _llmService.isAvailable()) {
+        try {
+          final result = await _aiService.analyzeContent(content: ocrText);
+          final title = result.title.isNotEmpty
+              ? result.title
+              : '이미지 메모';
+          await _databaseService.insertMemo(Memo(
+            title: title,
+            content: result.content.isNotEmpty ? result.content : ocrText,
+            category: result.category.isNotEmpty ? result.category : '기타',
+          ));
+          await _debug.log('CPS: Image OCR memo saved via AI');
+          return title;
+        } catch (e) {
+          await _debug.log('CPS: Image AI failed ($e), saving OCR text');
+        }
+      }
+
+      await _databaseService.insertMemo(Memo(
+        title: '이미지 메모',
+        content: ocrText,
+        category: '기타',
+      ));
+      return '이미지 메모';
+    }
+
+    await _debug.log('CPS: No text found in image');
+    await _databaseService.insertMemo(Memo(
+      title: '이미지 메모',
+      content: '📷 이미지가 공유되었습니다.\n\n이 이미지에서 인식된 텍스트가 없습니다.',
+      category: '기타',
+    ));
+    return '이미지 메모';
   }
 
   Future<String> _saveFallback(String url, String category) async {

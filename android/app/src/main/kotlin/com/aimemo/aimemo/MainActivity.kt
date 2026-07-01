@@ -3,6 +3,7 @@ package com.aimemo.aimemo
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity
@@ -63,8 +64,56 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleIntent(intent: Intent) {
-        if (Intent.ACTION_SEND == intent.action && intent.type == "text/plain") {
-            sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+        if (Intent.ACTION_SEND != intent.action) return
+
+        when {
+            intent.type == "text/plain" -> {
+                sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+            }
+            intent.type?.startsWith("image/") == true -> {
+                val imageUri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                if (imageUri != null) {
+                    val persisted = try {
+                        contentResolver.takePersistableUriPermission(
+                            imageUri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                        )
+                        true
+                    } catch (_: SecurityException) {
+                        false
+                    }
+
+                    val uriToUse = if (persisted) {
+                        imageUri
+                    } else {
+                        copyImageToCache(imageUri)
+                    }
+
+                    if (uriToUse != null) {
+                        AimemoQueue.enqueue(
+                            applicationContext,
+                            listOf(QueueItem(content = uriToUse.toString(), type = "image")),
+                        )
+                        AimemoBackgroundService.start(applicationContext)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun copyImageToCache(uri: Uri): Uri? {
+        return try {
+            val inputStream = contentResolver.openInputStream(uri) ?: return null
+            val cacheDir = java.io.File(cacheDir, "shared_images")
+            cacheDir.mkdirs()
+            val cacheFile = java.io.File(cacheDir, "img_${java.util.UUID.randomUUID()}.tmp")
+            java.io.FileOutputStream(cacheFile).use { output ->
+                inputStream.copyTo(output)
+            }
+            inputStream.close()
+            Uri.fromFile(cacheFile)
+        } catch (_: Exception) {
+            null
         }
     }
 
