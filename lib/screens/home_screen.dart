@@ -158,7 +158,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Aimemo'),
+        title: Row(
+          children: [
+            Icon(
+              Icons.auto_stories_rounded,
+              color: Theme.of(context).colorScheme.primary,
+              size: 24,
+            ),
+            const SizedBox(width: 10),
+            const Text('Aimemo'),
+          ],
+        ),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
           if (!_isAiAvailable)
@@ -168,9 +178,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               onPressed: () => _openSettings(),
             ),
           IconButton(
-            icon: const Icon(Icons.smart_toy_outlined),
-            tooltip: 'AI 챗봇',
-            onPressed: () => _openChat(),
+            icon: const Icon(Icons.add_circle_outline),
+            tooltip: '메모 추가',
+            onPressed: () => _openMemoInput(),
           ),
           IconButton(
             icon: const Icon(Icons.settings),
@@ -210,7 +220,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             icon: Icons.note_alt_outlined,
                             title: '아직 메모가 없습니다',
                             subtitle: _isAiAvailable
-                                ? '하단 + 버튼을 눌러 메모를 추가하거나\nYouTube에서 영상을 공유해보세요!'
+                                ? '상단 + 버튼을 눌러 메모를 추가하거나\nYouTube에서 영상을 공유해보세요!'
                                 : '설정에서 AI 모델 제공자를 연결해주세요.',
                             action: !_isAiAvailable
                                 ? FilledButton.tonalIcon(
@@ -244,8 +254,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ],
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => _openMemoInput(),
-        child: const Icon(Icons.add),
+        onPressed: () => _openChat(),
+        child: const Icon(Icons.smart_toy_outlined),
       ),
     );
   }
