@@ -186,6 +186,7 @@ class ContentProcessingService {
         category: result.category.isNotEmpty ? result.category : '기타',
         sourceUrl: url,
         youtubeVideoId: videoId,
+        thumbnailUrl: videoInfo.thumbnailUrl,
       ));
       await _debug.log('CPS: YouTube memo saved');
       return title;
@@ -198,6 +199,7 @@ class ContentProcessingService {
         category: '기타',
         sourceUrl: url,
         youtubeVideoId: videoId,
+        thumbnailUrl: videoInfo.thumbnailUrl,
       ));
       return videoInfo.title;
     }
@@ -224,6 +226,7 @@ class ContentProcessingService {
         content: result.content.isNotEmpty ? result.content : extractedContent,
         category: result.category.isNotEmpty ? result.category : '기타',
         sourceUrl: url,
+        thumbnailUrl: tiktokInfo.thumbnailUrl,
       ));
       await _debug.log('CPS: TikTok memo saved');
       return title;
@@ -234,6 +237,7 @@ class ContentProcessingService {
         content: extractedContent,
         category: '기타',
         sourceUrl: url,
+        thumbnailUrl: tiktokInfo.thumbnailUrl,
       ));
       return tiktokInfo.title;
     }
@@ -392,21 +396,23 @@ class ContentProcessingService {
     await _debug.log('CPS: Processing image: $imageUri');
 
     final queue = BackgroundQueueService();
-    final ocrText = await queue.performOcr(imageUri);
+    final ocrResult = await queue.performOcr(imageUri);
+    final localImagePath = ocrResult.localImagePath;
 
-    if (ocrText != null && ocrText.isNotEmpty) {
-      await _debug.log('CPS: OCR found text (${ocrText.length} chars)');
+    if (ocrResult.text != null && ocrResult.text!.isNotEmpty) {
+      await _debug.log('CPS: OCR found text (${ocrResult.text!.length} chars)');
 
       if (await _llmService.isAvailable()) {
         try {
-          final result = await _aiService.analyzeContent(content: ocrText);
+          final result = await _aiService.analyzeContent(content: ocrResult.text!);
           final title = result.title.isNotEmpty
               ? result.title
               : '이미지 메모';
           await _databaseService.insertMemo(Memo(
             title: title,
-            content: result.content.isNotEmpty ? result.content : ocrText,
+            content: result.content.isNotEmpty ? result.content : ocrResult.text!,
             category: result.category.isNotEmpty ? result.category : '기타',
+            imagePath: localImagePath,
           ));
           await _debug.log('CPS: Image OCR memo saved via AI');
           return title;
@@ -417,8 +423,9 @@ class ContentProcessingService {
 
       await _databaseService.insertMemo(Memo(
         title: '이미지 메모',
-        content: ocrText,
+        content: ocrResult.text!,
         category: '기타',
+        imagePath: localImagePath,
       ));
       return '이미지 메모';
     }
@@ -428,6 +435,7 @@ class ContentProcessingService {
       title: '이미지 메모',
       content: '📷 이미지가 공유되었습니다.\n\n이 이미지에서 인식된 텍스트가 없습니다.',
       category: '기타',
+      imagePath: localImagePath,
     ));
     return '이미지 메모';
   }

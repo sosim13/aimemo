@@ -16,6 +16,8 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
 import io.flutter.FlutterInjector
 import io.flutter.embedding.engine.FlutterEngine
+import java.io.File
+import java.io.FileOutputStream
 import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugins.GeneratedPluginRegistrant
@@ -107,9 +109,11 @@ class AimemoBackgroundService : Service() {
     }
 
     /// Run ML Kit OCR on the image at the given content URI.
+    /// Also saves the image to app-internal storage for persistent display.
     /// Returns a map with:
     ///   - text: recognized text (empty string if none)
     ///   - hasText: whether any text was found
+    ///   - localPath: path to the saved image file (or null if save failed)
     private fun performOcr(imageUri: String, result: MethodChannel.Result) {
         try {
             val uri = Uri.parse(imageUri)
@@ -127,16 +131,35 @@ class AimemoBackgroundService : Service() {
                 return
             }
 
+            // Save image to app-internal storage for persistent display
+            val savedPath = try {
+                val imagesDir = File(filesDir, "images")
+                imagesDir.mkdirs()
+                val imageFile = File(imagesDir, "memo_${System.currentTimeMillis()}.jpg")
+                val out = FileOutputStream(imageFile)
+                try {
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
+                } finally {
+                    out.close()
+                }
+                imageFile.absolutePath
+            } catch (_: Exception) {
+                null
+            }
+
             val image = InputImage.fromBitmap(bitmap, 0)
             val recognizer = TextRecognition.getClient(KoreanTextRecognizerOptions.Builder().build())
 
             recognizer.process(image)
                 .addOnSuccessListener { visionText ->
                     val recognizedText = visionText.text.trim()
-                    val response = mapOf(
+                    val response = mutableMapOf<String, Any>(
                         "text" to recognizedText,
                         "hasText" to (recognizedText.isNotEmpty()),
                     )
+                    if (savedPath != null) {
+                        response["localPath"] = savedPath
+                    }
                     result.success(response)
                     recognizer.close()
                 }

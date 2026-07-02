@@ -1,3 +1,4 @@
+import 'dart:io' show File;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -308,9 +309,15 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
               ),
             const SizedBox(height: 8),
 
-            // YouTube link
-            if (memo.youtubeVideoId != null) ...[
-              _buildYoutubeSection(context, memo),
+            // YouTube / TikTok thumbnail
+            if (memo.hasThumbnail) ...[
+              _buildThumbnailSection(context, memo),
+              const SizedBox(height: 16),
+            ],
+
+            // Local image from gallery share
+            if (memo.hasImage) ...[
+              _buildImageSection(context, memo),
               const SizedBox(height: 16),
             ],
 
@@ -421,56 +428,42 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     );
   }
 
-  Widget _buildYoutubeSection(BuildContext context, Memo memo) {
+  Widget _buildThumbnailSection(BuildContext context, Memo memo) {
+    final isYoutube = memo.youtubeVideoId != null;
+    final label = isYoutube ? 'YouTube' : '비디오';
+    final sourceUrl = isYoutube
+        ? 'https://www.youtube.com/watch?v=${memo.youtubeVideoId}'
+        : memo.sourceUrl;
+
     return Card(
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: InkWell(
-        onTap: () => _openUrl(
-            'https://www.youtube.com/watch?v=${memo.youtubeVideoId}'),
+        onTap: sourceUrl != null ? () => _openUrl(sourceUrl) : null,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Thumbnail placeholder
-            Container(
-              height: 180,
+            // Thumbnail image from network
+            SizedBox(
+              height: 200,
               width: double.infinity,
-              color: Colors.grey[200],
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  Center(
-                    child: Icon(Icons.play_circle_fill,
-                        size: 56, color: Colors.red[600]),
-                  ),
-                  Positioned(
-                    bottom: 8,
-                    left: 8,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.play_arrow,
-                              size: 14, color: Colors.white),
-                          SizedBox(width: 4),
-                          Text(
-                            'YouTube',
-                            style: TextStyle(
-                                color: Colors.white, fontSize: 12),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
+              child: Image.network(
+                memo.thumbnailUrl!,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => _mediaPlaceholder(
+                  Icons.movie_creation_outlined,
+                  label,
+                ),
+                loadingBuilder: (_, child, progress) {
+                  if (progress == null) return child;
+                  return _mediaPlaceholder(
+                    Icons.movie_creation_outlined,
+                    label,
+                  );
+                },
               ),
             ),
+            // Bottom bar
             Padding(
               padding: const EdgeInsets.all(12),
               child: Row(
@@ -480,7 +473,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'YouTube에서 영상 보기',
+                      '$label에서 영상 보기',
                       style: const TextStyle(fontWeight: FontWeight.w500),
                     ),
                   ),
@@ -488,6 +481,63 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
                       size: 16, color: Colors.grey[500]),
                 ],
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildImageSection(BuildContext context, Memo memo) {
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: double.infinity,
+            child: Image.file(
+              File(memo.imagePath!),
+              fit: BoxFit.contain,
+              errorBuilder: (_, __, ___) => _mediaPlaceholder(
+                Icons.broken_image,
+                '이미지',
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              children: [
+                Icon(Icons.image, size: 18, color: Colors.grey[600]),
+                const SizedBox(width: 8),
+                Text(
+                  '공유된 이미지',
+                  style: const TextStyle(fontWeight: FontWeight.w500),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _mediaPlaceholder(IconData icon, String label) {
+    return Container(
+      height: 200,
+      width: double.infinity,
+      color: Colors.grey[200],
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 48, color: Colors.grey[400]),
+            const SizedBox(height: 8),
+            Text(
+              label,
+              style: TextStyle(color: Colors.grey[500], fontSize: 13),
             ),
           ],
         ),

@@ -21,8 +21,9 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
   }
 
@@ -35,6 +36,8 @@ class DatabaseService {
         category TEXT NOT NULL,
         sourceUrl TEXT,
         youtubeVideoId TEXT,
+        thumbnailUrl TEXT,
+        imagePath TEXT,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL
       )
@@ -47,6 +50,17 @@ class DatabaseService {
     await db.execute('''
       CREATE INDEX idx_memos_created_at ON memos(createdAt)
     ''');
+  }
+
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute(
+        'ALTER TABLE memos ADD COLUMN thumbnailUrl TEXT',
+      );
+      await db.execute(
+        'ALTER TABLE memos ADD COLUMN imagePath TEXT',
+      );
+    }
   }
 
   // CRUD Operations

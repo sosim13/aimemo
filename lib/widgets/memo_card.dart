@@ -1,3 +1,4 @@
+import 'dart:io' show File;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../models/memo.dart';
@@ -23,68 +24,147 @@ class MemoCard extends StatelessWidget {
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       elevation: 1,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      clipBehavior: Clip.antiAlias,
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
         onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Top row: category chip + date
-              Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Thumbnail preview for media memos
+            if (memo.hasMedia) _buildThumbnail(context),
+
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  CategoryChip(category: memo.category),
-                  const SizedBox(width: 8),
-                  Text(
-                    dateFormat.format(memo.createdAt),
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Colors.grey[500],
+                  // Top row: category chip + date
+                  Row(
+                    children: [
+                      CategoryChip(category: memo.category),
+                      const SizedBox(width: 8),
+                      Text(
+                        dateFormat.format(memo.createdAt),
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: Colors.grey[500]),
+                      ),
+                      const Spacer(),
+                      if (memo.sourceUrl != null)
+                        Icon(Icons.link, size: 16, color: Colors.grey[400]),
+                      if (memo.youtubeVideoId != null) ...[
+                        const SizedBox(width: 4),
+                        Icon(Icons.play_circle_outline,
+                            size: 16, color: Colors.red[300]),
+                      ],
+                      if (memo.imagePath != null) ...[
+                        const SizedBox(width: 4),
+                        Icon(Icons.image, size: 16, color: Colors.grey[400]),
+                      ],
+                      if (onDelete != null)
+                        IconButton(
+                          icon: Icon(Icons.delete_outline,
+                              size: 18, color: Colors.grey[400]),
+                          onPressed: onDelete,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          splashRadius: 16,
                         ),
+                    ],
                   ),
-                  const Spacer(),
-                  if (memo.sourceUrl != null)
-                    Icon(Icons.link, size: 16, color: Colors.grey[400]),
-                  if (memo.youtubeVideoId != null) ...[
-                    const SizedBox(width: 4),
-                    Icon(Icons.play_circle_outline,
-                        size: 16, color: Colors.red[300]),
-                  ],
-                  if (onDelete != null)
-                    IconButton(
-                      icon: Icon(Icons.delete_outline,
-                          size: 18, color: Colors.grey[400]),
-                      onPressed: onDelete,
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(),
-                      splashRadius: 16,
-                    ),
+                  const SizedBox(height: 8),
+                  // Title
+                  Text(
+                    memo.title,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  // Content preview
+                  Text(
+                    memo.content,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Colors.grey[600],
+                        ),
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ],
               ),
-              const SizedBox(height: 8),
-              // Title
-              Text(
-                memo.title,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              const SizedBox(height: 4),
-              // Content preview
-              Text(
-                memo.content,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: Colors.grey[600],
-                    ),
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
+    );
+  }
+
+  Widget _buildThumbnail(BuildContext context) {
+    // Local image from gallery share
+    if (memo.hasImage) {
+      return SizedBox(
+        height: 160,
+        width: double.infinity,
+        child: Image.file(
+          File(memo.imagePath!),
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _placeholderIcon(Icons.broken_image),
+        ),
+      );
+    }
+
+    // YouTube / TikTok thumbnail from network URL
+    if (memo.hasThumbnail) {
+      return SizedBox(
+        height: 160,
+        width: double.infinity,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Image.network(
+              memo.thumbnailUrl!,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) =>
+                  _placeholderIcon(Icons.movie_creation_outlined),
+              loadingBuilder: (_, child, progress) {
+                if (progress == null) return child;
+                return _placeholderIcon(Icons.movie_creation_outlined);
+              },
+            ),
+            // Play button overlay for video thumbnails
+            if (memo.youtubeVideoId != null)
+              Positioned.fill(
+                child: Container(
+                  alignment: Alignment.center,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.black38,
+                      shape: BoxShape.circle,
+                    ),
+                    padding: const EdgeInsets.all(8),
+                    child: const Icon(Icons.play_arrow,
+                        color: Colors.white, size: 32),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
+    }
+
+    return const SizedBox.shrink();
+  }
+
+  Widget _placeholderIcon(IconData icon) {
+    return Container(
+      height: 160,
+      width: double.infinity,
+      color: Colors.grey[200],
+      child: Icon(icon, size: 48, color: Colors.grey[400]),
     );
   }
 }

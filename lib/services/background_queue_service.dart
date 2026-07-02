@@ -88,21 +88,27 @@ class BackgroundQueueService {
   }
 
   /// Run ML Kit OCR on the image at the given content URI.
-  /// Returns the recognized text, or null if no text found.
-  Future<String?> performOcr(String imageUri) async {
+  /// Returns the recognized text and local image path.
+  /// If no text found, [text] is null but [localImagePath] may still be set.
+  Future<({String? text, String? localImagePath})> performOcr(
+      String imageUri) async {
     try {
       final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
         'performOcr',
         {'imageUri': imageUri},
       );
-      if (result == null) return null;
+      if (result == null) return (text: null, localImagePath: null);
       final hasText = result['hasText'] as bool? ?? false;
       final text = result['text'] as String? ?? '';
-      return hasText ? text : null;
+      final localImagePath = result['localPath'] as String?;
+      return (
+        text: hasText ? text : null,
+        localImagePath: localImagePath,
+      );
     } on MissingPluginException {
-      return null;
+      return (text: null, localImagePath: null);
     } catch (e) {
-      return null;
+      return (text: null, localImagePath: null);
     }
   }
 }
