@@ -70,6 +70,26 @@ class LlmService {
     );
   }
 
+  /// Free-form Q&A with current provider
+  Future<String> ask({
+    required String prompt,
+    double temperature = 0.7,
+    int topK = 40,
+    int maxTokens = 2048,
+  }) async {
+    return currentProvider.ask(
+      prompt: prompt,
+      temperature: temperature,
+      topK: topK,
+      maxTokens: maxTokens,
+    );
+  }
+
+  /// Cancel the currently running ask/analyze operation.
+  void cancel() {
+    currentProvider.cancel();
+  }
+
   /// Check if provider is available
   Future<bool> isAvailable() async {
     return await currentProvider.isAvailable();

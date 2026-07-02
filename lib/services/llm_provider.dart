@@ -70,6 +70,20 @@ abstract class LlmProvider {
     String? youtubeVideoId,
   });
 
+  /// Free-form Q&A with the currently selected model.
+  /// Returns the raw text response without structured parsing.
+  /// [prompt] is the full prompt sent to the model (system + user).
+  Future<String> ask({
+    required String prompt,
+    double temperature = 0.7,
+    int topK = 40,
+    int maxTokens = 2048,
+  });
+
+  /// Cancel the currently running [ask] or [analyze] operation, if supported.
+  /// This is a no-op if nothing is running or cancellation is not supported.
+  void cancel();
+
   /// List models available on this provider
   Future<List<ModelStatus>> getModels();
 

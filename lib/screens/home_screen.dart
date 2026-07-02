@@ -13,6 +13,7 @@ import '../widgets/category_chip.dart';
 import 'settings_screen.dart';
 import 'memo_input_screen.dart';
 import 'memo_detail_screen.dart';
+import 'chat_screen.dart';
 
 
 class HomeScreen extends StatefulWidget {
@@ -167,6 +168,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               onPressed: () => _openSettings(),
             ),
           IconButton(
+            icon: const Icon(Icons.smart_toy_outlined),
+            tooltip: 'AI 챗봇',
+            onPressed: () => _openChat(),
+          ),
+          IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => _openSettings(),
           ),
@@ -267,6 +273,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ),
         visualDensity: VisualDensity.compact,
       ),
+    );
+  }
+
+  Future<void> _openChat() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const ChatScreen()),
     );
   }
 

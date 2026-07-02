@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter_gemma/flutter_gemma.dart';
 import 'llm_provider.dart';
 import 'gemma_diag.dart';
@@ -248,6 +249,85 @@ class GemmaProvider implements LlmProvider {
       await _session?.close();
       _session = null;
     }
+  }
+
+  /// Tracks the active chat session so we can cancel mid-generation.
+  InferenceModelSession? _chatSession;
+
+  @override
+  Future<String> ask({
+    required String prompt,
+    double temperature = 0.7,
+    int topK = 40,
+    int maxTokens = 2048,
+  }) async {
+    GemmaDiag.logSync(
+      'ask ENTER (initialized=$_initialized, model=${_model != null})',
+    );
+    if (!_initialized || _model == null) {
+      throw Exception(
+        'Gemma 엔진이 초기화되지 않았습니다. 모델을 먼저 선택해주세요.',
+      );
+    }
+
+    // Check if already cancelled before starting
+    if (_cancelled) {
+      _cancelled = false;
+      throw Exception('AI 응답이 취소되었습니다.');
+    }
+
+    final session = await _model!.createSession(
+      temperature: temperature,
+      randomSeed: 42,
+      topK: topK,
+    );
+    _chatSession = session;
+    try {
+      await session.addQueryChunk(Message.text(text: prompt, isUser: true));
+
+      // Poll for cancellation during generation
+      final response = await _waitWithCancel(session);
+
+      if (response.trim().isEmpty) {
+        throw Exception('AI가 응답을 생성하지 못했습니다 (빈 결과).');
+      }
+
+      return response.trim();
+    } finally {
+      await session.close();
+      _chatSession = null;
+    }
+  }
+
+  /// Wraps [session.getResponse()] so we can abort on cancel.
+  Future<String> _waitWithCancel(InferenceModelSession session) async {
+    // Start the real response future
+    final responseFuture = session.getResponse();
+
+    // Poll every 200ms until either response arrives or cancel is signalled
+    while (true) {
+      try {
+        final response = await responseFuture.timeout(
+          const Duration(milliseconds: 200),
+        );
+        return response; // response arrived
+      } on TimeoutException {
+        // Still generating — check cancel flag
+        if (_cancelled) {
+          _cancelled = false;
+          throw Exception('AI 응답이 취소되었습니다.');
+        }
+        // Continue polling
+      }
+    }
+  }
+
+  bool _cancelled = false;
+
+  @override
+  void cancel() {
+    GemmaDiag.logSync('cancel() called');
+    _cancelled = true;
   }
 
   Future<void> _closeEngine() async {

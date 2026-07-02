@@ -11,6 +11,7 @@ import 'screens/settings_screen.dart';
 import 'screens/memo_input_screen.dart';
 import 'screens/memo_detail_screen.dart';
 import 'screens/url_processing_screen.dart';
+import 'screens/chat_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -205,6 +206,10 @@ class AimemoApp extends StatelessWidget {
               builder: (_) => MemoDetailScreen(
                 memoId: args['memoId'] as int,
               ),
+            );
+          case '/chat':
+            return MaterialPageRoute(
+              builder: (_) => const ChatScreen(),
             );
           case '/url-processing':
             final args = settings.arguments as Map<String, dynamic>;
