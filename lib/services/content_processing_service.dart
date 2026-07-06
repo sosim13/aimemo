@@ -694,6 +694,162 @@ class ContentProcessingService {
     return url;
   }
 
+  // ---------------------------------------------------------------------------
+  // Retry — re-process an existing memo with AI and update in-place
+  // ---------------------------------------------------------------------------
+
+  /// Re-run AI analysis on an existing memo and update its title / content /
+  /// category in the database. Returns the updated [Memo], or null if retry
+  /// is not applicable (e.g. image-only with no text).
+  ///
+  /// For URL-based memos the original URL is re-fetched; for text memos the
+  /// current [Memo.content] is used as the AI input.
+  Future<Memo?> retryMemo(Memo memo) async {
+    await _debug.log('CPS: Retrying memo id=${memo.id}');
+
+    // ── 1. Decide processing strategy ──
+    if (memo.youtubeVideoId != null && memo.sourceUrl != null) {
+      // YouTube: re-fetch transcript + re-analyze
+      return _retryYouTube(memo, memo.sourceUrl!);
+    } else if (memo.sourceUrl != null) {
+      // Generic URL or TikTok
+      return _retryUrl(memo, memo.sourceUrl!);
+    } else if (memo.imagePath != null) {
+      // Re-process image (OCR + AI analysis)
+      return _retryImage(memo);
+    } else {
+      // Plain text: use current content as AI input
+      return _retryText(memo);
+    }
+  }
+
+  Future<Memo> _retryYouTube(Memo memo, String url) async {
+    final videoId = memo.youtubeVideoId!;
+    final videoInfo = await _youtubeService.getVideoInfo(videoId);
+    if (videoInfo == null) return memo; // Keep original
+
+    final transcript = await _youtubeService.fetchTranscript(videoId);
+    final videoInfoWithTranscript = YouTubeVideoInfo(
+      videoId: videoInfo.videoId,
+      title: videoInfo.title,
+      description: videoInfo.description,
+      thumbnailUrl: videoInfo.thumbnailUrl,
+      channelName: videoInfo.channelName,
+      transcript: transcript,
+    );
+
+    final extractedContent = videoInfoWithTranscript.buildContentForAi();
+    final result = await _aiService.analyzeContent(
+      content: extractedContent,
+      sourceUrl: url,
+      youtubeVideoId: videoId,
+    );
+
+    final title = result.title.isNotEmpty ? result.title : videoInfo.title;
+    final updated = memo.copyWith(
+      title: title,
+      content: result.content.isNotEmpty ? result.content : extractedContent,
+      category: result.category.isNotEmpty ? result.category : '기타',
+      thumbnailUrl: videoInfo.thumbnailUrl,
+      updatedAt: DateTime.now(),
+    );
+    await _databaseService.updateMemo(updated);
+    return updated;
+  }
+
+  Future<Memo> _retryUrl(Memo memo, String url) async {
+    // Try to fetch page content, fall back to AI on current content
+    String? extractedContent;
+    String? pageTitle;
+
+    final pageInfo = await _webPageService.fetchPageContent(url);
+    if (pageInfo != null && pageInfo.textContent.isNotEmpty) {
+      pageTitle = pageInfo.title;
+      extractedContent = '웹페이지 제목: ${pageInfo.title}\n'
+          '설명: ${pageInfo.description}\n'
+          '본문 내용:\n${pageInfo.textContent}';
+    }
+
+    if (extractedContent == null || extractedContent.isEmpty) {
+      // Fallback: use current memo content as AI input
+      return _retryText(memo);
+    }
+
+    final aiContent = extractedContent.length > 3000
+        ? '${extractedContent.substring(0, 3000)}\n\n[...이하 생략...]'
+        : extractedContent;
+
+    final result = await _aiService.analyzeContent(
+      content: aiContent,
+      sourceUrl: url,
+    );
+
+    var finalContent = result.content.isNotEmpty ? result.content : extractedContent;
+    var finalCategory = result.category.isNotEmpty ? result.category : '기타';
+
+    if (result.content.isEmpty || result.content.length > aiContent.length * 0.8) {
+      finalContent = extractedContent.length > 500
+          ? '${extractedContent.substring(0, 500)}\n\n📌 AI 요약에 실패했습니다. 원본 내용 중 일부를 표시합니다.'
+          : extractedContent;
+      if (finalCategory == '기타') {
+        final detected = CategoryDetector.detect(extractedContent);
+        if (detected != null) finalCategory = detected;
+      }
+    }
+
+    final title = result.title.isNotEmpty ? result.title : (pageTitle ?? url);
+    final updated = memo.copyWith(
+      title: title,
+      content: finalContent,
+      category: finalCategory,
+      updatedAt: DateTime.now(),
+    );
+    await _databaseService.updateMemo(updated);
+    return updated;
+  }
+
+  Future<Memo> _retryText(Memo memo) async {
+    final content = memo.content;
+    if (!await _llmService.isAvailable()) return memo;
+
+    final result = await _aiService.analyzeContent(content: content);
+    final title = result.title.isNotEmpty ? result.title : memo.title;
+
+    final updated = memo.copyWith(
+      title: title,
+      content: result.content.isNotEmpty ? result.content : content,
+      category: result.category.isNotEmpty ? result.category : memo.category,
+      updatedAt: DateTime.now(),
+    );
+    await _databaseService.updateMemo(updated);
+    return updated;
+  }
+
+  Future<Memo> _retryImage(Memo memo) async {
+    final imagePath = memo.imagePath!;
+    final queue = BackgroundQueueService();
+    final ocrResult = await queue.performOcr(imagePath);
+
+    if (ocrResult.text == null || ocrResult.text!.isEmpty) {
+      return memo; // No text found, keep original
+    }
+
+    if (await _llmService.isAvailable()) {
+      final result = await _aiService.analyzeContent(content: ocrResult.text!);
+      final title = result.title.isNotEmpty ? result.title : memo.title;
+      final updated = memo.copyWith(
+        title: title,
+        content: result.content.isNotEmpty ? result.content : ocrResult.text!,
+        category: result.category.isNotEmpty ? result.category : memo.category,
+        updatedAt: DateTime.now(),
+      );
+      await _databaseService.updateMemo(updated);
+      return updated;
+    }
+
+    return memo;
+  }
+
   /// Clean up resources.
   void dispose() {
     _refreshTimer?.cancel();

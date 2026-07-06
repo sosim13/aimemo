@@ -5,6 +5,8 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/memo.dart';
 import '../services/database_service.dart';
+import '../services/content_processing_service.dart';
+import '../services/llm_service.dart';
 import '../widgets/category_chip.dart';
 import '../services/category_detector.dart';
 
@@ -19,9 +21,11 @@ class MemoDetailScreen extends StatefulWidget {
 
 class _MemoDetailScreenState extends State<MemoDetailScreen> {
   final _databaseService = DatabaseService();
+  final _processingService = ContentProcessingService();
   Memo? _memo;
   bool _isLoading = true;
   bool _isEditing = false;
+  bool _isRetrying = false;
 
   late TextEditingController _titleController;
   late TextEditingController _contentController;
@@ -139,6 +143,54 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     }
   }
 
+  Future<void> _retryAnalysis() async {
+    if (_memo == null || _isRetrying) return;
+
+    // Check AI availability
+    final llm = LlmService();
+    if (!await llm.isAvailable()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('⚠️ AI 모델이 연결되지 않았습니다. 설정에서 모델을 선택해주세요.')),
+        );
+      }
+      return;
+    }
+
+    setState(() => _isRetrying = true);
+
+    try {
+      final updated = await _processingService.retryMemo(_memo!);
+      if (mounted) {
+        setState(() {
+          _memo = updated;
+          _isRetrying = false;
+          if (updated != null) {
+            _titleController.text = updated.title;
+            _contentController.text = updated.content;
+            _categoryController.text = updated.category;
+          }
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('✅ AI 재요약이 완료되었습니다.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isRetrying = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ 재요약 실패: $e'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
   void _copyContent() {
     if (_memo == null) return;
     final combined =
@@ -203,9 +255,28 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isEditing ? '메모 편집' : '메모 상세'),
+        title: Text(_isEditing
+            ? '메모 편집'
+            : _isRetrying
+                ? 'AI 재요약 중...'
+                : '메모 상세'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
+          if (_isRetrying)
+            Padding(
+              padding: const EdgeInsets.only(right: 12),
+              child: Center(
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                ),
+              ),
+            )
+          else
           if (_isEditing) ...[
             IconButton(
               icon: const Icon(Icons.close),
@@ -224,6 +295,11 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
               onPressed: _copyContent,
             ),
             IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'AI 재요약',
+              onPressed: _isRetrying ? null : _retryAnalysis,
+            ),
+            IconButton(
               icon: const Icon(Icons.edit_outlined),
               tooltip: '편집',
               onPressed: _enterEditMode,
@@ -236,11 +312,13 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
           ],
         ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      body: Stack(
+        children: [
+          SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
             // Category + Date row
             Row(
               children: [
@@ -424,6 +502,37 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
               ),
           ],
         ),
+      ),
+
+          // Loading overlay when retrying
+          if (_isRetrying)
+            Container(
+              color: Colors.black.withValues(alpha: 0.15),
+              child: const Center(
+                child: Card(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(),
+                        SizedBox(height: 16),
+                        Text(
+                          'AI 재요약 중...',
+                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+                        ),
+                        SizedBox(height: 4),
+                        Text(
+                          '로컬 모델로 내용을 분석하고 있습니다',
+                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
