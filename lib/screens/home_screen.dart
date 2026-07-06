@@ -29,6 +29,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _processingService = ContentProcessingService();
   final _backgroundQueue = BackgroundQueueService();
 
+  /// Scroll controller for the memo list — preserves scroll position
+  /// after returning from detail view or reloading memos.
+  final ScrollController _scrollController = ScrollController();
+
   List<Memo> _memos = [];
   Map<String, int> _categoryCounts = {};
   String? _selectedCategory;
@@ -60,6 +64,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _scrollController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _processingSubscription?.cancel();
     super.dispose();
@@ -105,6 +110,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _loadMemos() async {
+    // Save current scroll offset before reload
+    final savedOffset =
+        _scrollController.hasClients ? _scrollController.offset : 0.0;
+
     setState(() => _isLoading = true);
     try {
       final memos = await _databaseService.getAllMemos();
@@ -115,6 +124,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           _categoryCounts = categoryCounts;
           _isLoading = false;
         });
+        // Restore scroll position after the frame renders
+        if (savedOffset > 0) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_scrollController.hasClients) {
+              _scrollController.jumpTo(
+                savedOffset.clamp(
+                  0.0,
+                  _scrollController.position.maxScrollExtent,
+                ),
+              );
+            }
+          });
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -238,6 +260,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     : RefreshIndicator(
                         onRefresh: _loadMemos,
                         child: ListView.builder(
+                          controller: _scrollController,
                           padding: const EdgeInsets.only(top: 8, bottom: 80),
                           itemCount: _filteredMemos.length,
                           itemBuilder: (context, index) {
@@ -303,20 +326,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openMemoInput() async {
-    await Navigator.push(
+    final result = await Navigator.push<bool>(
       context,
       MaterialPageRoute(builder: (_) => const MemoInputScreen()),
     );
-    if (mounted) {
+    if (result == true && mounted) {
       await _loadMemos();
     }
   }
 
   Future<void> _openMemoDetail(Memo memo) async {
-    await Navigator.push(
+    final changed = await Navigator.push<bool>(
       context,
       MaterialPageRoute(builder: (_) => MemoDetailScreen(memoId: memo.id!)),
     );
-    await _loadMemos();
+    // Only reload if memo was deleted (pop returned true).
+    // Otherwise scroll position is preserved.
+    if (changed == true) {
+      await _loadMemos();
+    }
   }
 }
