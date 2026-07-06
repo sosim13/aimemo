@@ -2,7 +2,9 @@ import 'dart:collection';
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:uuid/uuid.dart';
 import '../models/memo.dart';
+import '../models/queue_state.dart';
 import 'background_queue_service.dart';
 import 'database_service.dart';
 import 'llm_service.dart';
@@ -14,8 +16,14 @@ import 'web_page_service.dart';
 import 'category_detector.dart';
 import 'debug_logger.dart';
 
-/// Type of content to process
-enum ContentType { url, text, image }
+// Native queue type to ContentType mapping
+ContentType _nativeTypeToContentType(String nativeType) {
+  return switch (nativeType) {
+    'url' => ContentType.url,
+    'image' => ContentType.image,
+    _ => ContentType.text,
+  };
+}
 
 /// An item waiting to be processed
 class ProcessingItem {
@@ -78,6 +86,27 @@ class ContentProcessingService {
   final _resultController = StreamController<ProcessingResult>.broadcast();
   Stream<ProcessingResult> get onItemProcessed => _resultController.stream;
 
+  /// Stream that emits queue state changes for UI (active + history items)
+  final _stateController = StreamController<QueueState>.broadcast();
+  Stream<QueueState> get queueState => _stateController.stream;
+
+  /// The item currently being processed (null if idle).
+  ProcessingItem? _currentItem;
+  String? _currentItemId;
+
+  /// Cached history items loaded from DB.
+  List<QueueItemProgress> _historyFromDb = [];
+  bool _historyLoaded = false;
+
+  /// Last known count of pending items in the native queue, used to detect
+  /// changes and avoid redundant state emissions.
+  int _lastNativePendingCount = 0;
+
+  /// Periodic timer that polls DB for new history entries.
+  /// Background isolate writes to DB but cannot notify the main isolate directly,
+  /// so we poll every 2 seconds to pick up new items.
+  Timer? _refreshTimer;
+
   /// Current queue depth (for UI badge etc.)
   int get pendingCount => _queue.length;
   QueueStatus get status =>
@@ -90,7 +119,11 @@ class ContentProcessingService {
     _processNext();
   }
 
-  Future<ProcessingResult> processItem(ProcessingItem item) async {
+  final _uuid = const Uuid();
+
+  Future<ProcessingResult> processItem(ProcessingItem item,
+      {String? itemId}) async {
+    itemId ??= _uuid.v4();
     try {
       final title = switch (item.type) {
         ContentType.url => await _processUrl(item.content),
@@ -99,13 +132,216 @@ class ContentProcessingService {
       };
       final result = ProcessingResult(success: true, title: title);
       _resultController.add(result);
+
+      // Persist to history DB
+      await _saveHistory(
+        itemId: itemId,
+        content: item.content,
+        type: item.type,
+        status: 'completed',
+        memoTitle: title,
+      );
+
+      // Refresh queue state
+      _emitQueueState();
+
       return result;
     } catch (e, stack) {
       await _debug.log('CPS: Processing failed: $e\n$stack');
       final result = ProcessingResult(success: false, error: e.toString());
       _resultController.add(result);
+
+      // Persist failure to history DB
+      await _saveHistory(
+        itemId: itemId,
+        content: item.content,
+        type: item.type,
+        status: 'failed',
+        error: e.toString(),
+      );
+
+      // Refresh queue state
+      _emitQueueState();
+
       return result;
     }
+  }
+
+  /// Persist a processing result to the history database.
+  Future<void> _saveHistory({
+    required String itemId,
+    required String content,
+    required ContentType type,
+    required String status,
+    String? memoTitle,
+    String? error,
+  }) async {
+    try {
+      await _databaseService.insertProcessingHistory(ProcessingHistoryItem(
+        itemId: itemId,
+        content: content,
+        type: type,
+        status: status,
+        progress: status == 'completed' ? 1.0 : 0.0,
+        error: error,
+        memoTitle: memoTitle,
+        completedAt: DateTime.now(),
+      ));
+    } catch (e) {
+      await _debug.log('CPS: Failed to save history: $e');
+    }
+  }
+
+  /// Load processing history from DB plus native queue pending items,
+  /// then emit updated state so the UI reflects current queue status.
+  Future<void> loadHistoryIntoState() async {
+    try {
+      // 1. Load completed/failed history from DB
+      final history = await _databaseService.getAllProcessingHistory();
+      final historyItems = history.map((h) => QueueItemProgress(
+            id: h.itemId,
+            content: h.content,
+            type: h.type,
+            progress: 1.0,
+            stage: h.status == 'completed'
+                ? ProcessingStage.completed
+                : ProcessingStage.failed,
+            statusText: h.status == 'completed' ? '완료' : '실패',
+            isCurrent: false,
+            error: h.error,
+            memoTitle: h.memoTitle,
+            completedAt: h.completedAt,
+          ));
+      final historyList = historyItems.toList();
+
+      // 2. Check native queue for items being processed or waiting
+      //    (backgroundMain in a separate isolate processes them)
+      List<QueueItemProgress> nativeActiveItems = [];
+      var nativeCount = 0;
+      try {
+        final nativePending = await BackgroundQueueService().getPendingItems();
+        nativeCount = nativePending.length;
+        if (nativeCount > 0) {
+          // First item is currently being processed, rest are waiting
+          for (var i = 0; i < nativeCount; i++) {
+            final n = nativePending[i];
+            final isCurrent = i == 0;
+            nativeActiveItems.add(QueueItemProgress(
+              id: n.id,
+              content: n.content,
+              type: _nativeTypeToContentType(
+                  n.type.name), // BackgroundQueueType → ContentType
+              progress: isCurrent ? 0.3 : 0.0,
+              stage: ProcessingStage.queued,
+              statusText: isCurrent ? '처리 중' : '대기 중',
+              isCurrent: isCurrent,
+            ));
+          }
+        }
+      } catch (_) {
+        // Native channel may not be available; fall through
+      }
+
+      // 3. Merge: native active items + in-memory queue + history
+      final combined = [
+        ...nativeActiveItems,
+        ..._buildActiveItemsFromMemory(),
+        ...historyList,
+      ];
+
+      final completedCount =
+          historyList.where((h) => h.stage == ProcessingStage.completed).length;
+      final failedCount =
+          historyList.where((h) => h.stage == ProcessingStage.failed).length;
+
+      final isProcessing = nativeActiveItems.isNotEmpty ||
+          _currentItem != null ||
+          _queue.isNotEmpty;
+
+      // 4. Emit only if something changed
+      final newHistoryOnly = historyList;
+      if (!_listEquals(newHistoryOnly, _historyFromDb) ||
+          nativeActiveItems.length != _lastNativePendingCount) {
+        _historyFromDb = newHistoryOnly;
+        _lastNativePendingCount = nativeActiveItems.length;
+        if (!_stateController.isClosed) {
+          _stateController.add(QueueState(
+            items: combined,
+            isProcessing: isProcessing,
+            pendingCount: _queue.length + nativeCount,
+            completedCount: completedCount,
+            failedCount: failedCount,
+          ));
+        }
+      } else {
+        _historyFromDb = newHistoryOnly;
+      }
+    } catch (e) {
+      await _debug.log('CPS: Failed to load history: $e');
+    }
+  }
+
+  /// Build active items from the in-memory queue (used when processing
+  /// happens via [enqueue] instead of the native background service).
+  List<QueueItemProgress> _buildActiveItemsFromMemory() {
+    final items = <QueueItemProgress>[];
+    if (_currentItem != null) {
+      items.add(QueueItemProgress(
+        id: _currentItemId ?? _uuid.v4(),
+        content: _currentItem!.content,
+        type: _currentItem!.type,
+        progress: 0.0,
+        stage: ProcessingStage.queued,
+        statusText: '처리 중',
+        isCurrent: true,
+      ));
+    }
+    for (final item in _queue) {
+      items.add(QueueItemProgress(
+        id: _uuid.v4(),
+        content: item.content,
+        type: item.type,
+        progress: 0.0,
+        stage: ProcessingStage.queued,
+        statusText: '대기 중',
+        isCurrent: false,
+      ));
+    }
+    return items;
+  }
+
+  /// Start a periodic timer that polls the DB for new history entries.
+  /// Background processing happens in a separate Dart isolate, so we need
+  /// to poll since the main isolate doesn't get automatic notifications.
+  void startPeriodicRefresh() {
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      loadHistoryIntoState();
+    });
+  }
+
+  /// Stop the periodic refresh timer.
+  void stopPeriodicRefresh() {
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
+  }
+
+  /// Compare two lists of QueueItemProgress by their IDs and status.
+  bool _listEquals(List<QueueItemProgress> a, List<QueueItemProgress> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].id != b[i].id) return false;
+      if (a[i].stage != b[i].stage) return false;
+    }
+    return true;
+  }
+
+  /// Build and emit the current queue state.
+  /// Delegates to [loadHistoryIntoState] which reads both DB history and
+  /// native queue status for a complete picture.
+  void _emitQueueState() {
+    // Fire-and-forget: loadHistoryIntoState handles the full state emission
+    loadHistoryIntoState();
   }
 
   /// Convenience: enqueue a URL for background processing.
@@ -128,10 +364,18 @@ class ContentProcessingService {
 
     while (_queue.isNotEmpty) {
       final item = _queue.removeFirst();
-      await processItem(item);
+      // Set current item and emit state so UI shows "processing"
+      _currentItem = item;
+      _currentItemId = _uuid.v4();
+      _emitQueueState();
+      await processItem(item, itemId: _currentItemId);
+      // Clear current item
+      _currentItem = null;
+      _currentItemId = null;
     }
 
     _isProcessing = false;
+    _emitQueueState();
   }
 
   // ---------------------------------------------------------------------------
@@ -452,6 +696,8 @@ class ContentProcessingService {
 
   /// Clean up resources.
   void dispose() {
+    _refreshTimer?.cancel();
     _resultController.close();
+    _stateController.close();
   }
 }

@@ -87,6 +87,18 @@ class BackgroundQueueService {
     await _channel.invokeMethod<void>('stopServiceIfIdle');
   }
 
+  /// Get the number of pending items in the native queue.
+  Future<int> pendingCount() async {
+    try {
+      final count = await _channel.invokeMethod<int>('pendingCount');
+      return count ?? 0;
+    } on MissingPluginException {
+      return 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
   /// Run ML Kit OCR on the image at the given content URI.
   /// Returns the recognized text and local image path.
   /// If no text found, [text] is null but [localImagePath] may still be set.

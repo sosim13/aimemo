@@ -50,6 +50,14 @@ class MainActivity : FlutterActivity() {
                     AimemoBackgroundService.start(applicationContext)
                     result.success(null)
                 }
+                "getPendingItems" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val pending = AimemoQueue.pending(applicationContext) as List<Map<String, String>>
+                    result.success(pending)
+                }
+                "pendingCount" -> {
+                    result.success(AimemoQueue.pendingCount(applicationContext))
+                }
                 else -> result.notImplemented()
             }
         }

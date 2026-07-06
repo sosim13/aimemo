@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
 import 'package:flutter_gemma_litertlm/flutter_gemma_litertlm.dart';
+import 'models/queue_state.dart';
 import 'services/database_service.dart';
 import 'services/llm_service.dart';
 import 'services/debug_logger.dart';
 import 'services/background_queue_service.dart';
 import 'services/content_processing_service.dart';
 import 'screens/home_screen.dart';
+import 'screens/queue_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/memo_input_screen.dart';
 import 'screens/memo_detail_screen.dart';
@@ -137,6 +139,66 @@ Future<void> backgroundMain() async {
   }
 }
 
+/// Main shell with bottom navigation bar.
+/// Three tabs: 메모 (Home), 처리현황 (Queue), 설정 (Settings)
+class MainShell extends StatefulWidget {
+  const MainShell({super.key});
+
+  @override
+  State<MainShell> createState() => _MainShellState();
+}
+
+class _MainShellState extends State<MainShell> {
+  int _currentIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    final cps = ContentProcessingService();
+    // Load processing history into queue state on startup
+    cps.loadHistoryIntoState();
+    // Start periodic polling for new history from background isolate
+    cps.startPeriodicRefresh();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IndexedStack(
+        index: _currentIndex,
+        children: const [
+          HomeScreen(),
+          QueueScreen(),
+          SettingsScreen(),
+        ],
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _currentIndex,
+        onDestinationSelected: (index) {
+          setState(() => _currentIndex = index);
+        },
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.home_outlined),
+            selectedIcon: Icon(Icons.home),
+            label: '메모',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.hourglass_bottom_outlined),
+            selectedIcon: Icon(Icons.hourglass_bottom),
+            label: '처리현황',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings),
+            label: '설정',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class AimemoApp extends StatelessWidget {
   const AimemoApp({super.key});
 
@@ -185,7 +247,7 @@ class AimemoApp extends StatelessWidget {
         switch (settings.name) {
           case '/':
             return MaterialPageRoute(
-              builder: (_) => const HomeScreen(),
+              builder: (_) => const MainShell(),
             );
           case '/settings':
             return MaterialPageRoute(
@@ -220,7 +282,7 @@ class AimemoApp extends StatelessWidget {
             );
           default:
             return MaterialPageRoute(
-              builder: (_) => const HomeScreen(),
+              builder: (_) => const MainShell(),
             );
         }
       },

@@ -1,6 +1,7 @@
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import '../models/memo.dart';
+import '../models/queue_state.dart';
 
 class DatabaseService {
   static final DatabaseService _instance = DatabaseService._internal();
@@ -21,7 +22,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -50,6 +51,25 @@ class DatabaseService {
     await db.execute('''
       CREATE INDEX idx_memos_created_at ON memos(createdAt)
     ''');
+
+    await db.execute('''
+      CREATE TABLE processing_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        itemId TEXT NOT NULL,
+        content TEXT NOT NULL,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        progress REAL DEFAULT 1.0,
+        error TEXT,
+        memoTitle TEXT,
+        createdAt TEXT NOT NULL,
+        completedAt TEXT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX idx_history_created_at ON processing_history(createdAt)
+    ''');
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -60,6 +80,25 @@ class DatabaseService {
       await db.execute(
         'ALTER TABLE memos ADD COLUMN imagePath TEXT',
       );
+    }
+    if (oldVersion < 3) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS processing_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          itemId TEXT NOT NULL,
+          content TEXT NOT NULL,
+          type TEXT NOT NULL,
+          status TEXT NOT NULL,
+          progress REAL DEFAULT 1.0,
+          error TEXT,
+          memoTitle TEXT,
+          createdAt TEXT NOT NULL,
+          completedAt TEXT
+        )
+      ''');
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_history_created_at ON processing_history(createdAt)
+      ''');
     }
   }
 
@@ -149,6 +188,41 @@ class DatabaseService {
       map[row['category'] as String] = row['count'] as int;
     }
     return map;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Processing History CRUD
+  // ---------------------------------------------------------------------------
+
+  Future<int> insertProcessingHistory(ProcessingHistoryItem item) async {
+    final db = await database;
+    return await db.insert('processing_history', item.toMap());
+  }
+
+  Future<List<ProcessingHistoryItem>> getAllProcessingHistory() async {
+    final db = await database;
+    final maps = await db.query(
+      'processing_history',
+      orderBy: 'createdAt DESC',
+    );
+    return maps.map((m) => ProcessingHistoryItem.fromMap(m)).toList();
+  }
+
+  Future<int> deleteProcessingHistory(int id) async {
+    final db = await database;
+    return await db.delete('processing_history', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<int> clearAllProcessingHistory() async {
+    final db = await database;
+    return await db.delete('processing_history');
+  }
+
+  Future<int> getProcessingHistoryCount() async {
+    final db = await database;
+    final result =
+        await db.rawQuery('SELECT COUNT(*) as cnt FROM processing_history');
+    return Sqflite.firstIntValue(result) ?? 0;
   }
 
   Future<void> close() async {
