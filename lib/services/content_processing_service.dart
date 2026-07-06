@@ -102,6 +102,37 @@ class ContentProcessingService {
   /// changes and avoid redundant state emissions.
   int _lastNativePendingCount = 0;
 
+  /// Last emitted active-item stage — used to detect progress updates that
+  /// would otherwise be filtered out by the history-change guard below.
+  ProcessingStage? _lastEmittedActiveStage;
+
+  /// Current stage of the item being processed (for progress tracking).
+  ProcessingStage _currentStage = ProcessingStage.queued;
+  /// Current progress (0.0–1.0) of the item being processed.
+  double _currentProgress = 0.0;
+  /// Status label for the current processing stage.
+  String _currentStatusText = '처리 중';
+
+  /// ── Retry tracking (independent of the main queue) ──
+
+  /// The memo currently being retried (null if idle).
+  Memo? _retryingMemo;
+  /// Current stage of the retry operation.
+  ProcessingStage _retryStage = ProcessingStage.queued;
+  /// Current progress (0.0–1.0) of the retry.
+  double _retryProgress = 0.0;
+  /// Status label for the retry stage.
+  String _retryStatusText = '';
+  /// Last emitted retry stage — used by [loadHistoryIntoState] to detect change.
+  ProcessingStage? _lastEmittedRetryStage;
+  /// Last emitted retry queue length — detects new queued retries.
+  int _lastRetryQueueLength = 0;
+
+  /// Queue of memos awaiting retry (processed sequentially to avoid concurrent
+  /// AI inference which would crash the local model / corrupt shared fields).
+  final List<Memo> _retryQueue = [];
+  bool _isRetryLock = false;
+
   /// Periodic timer that polls DB for new history entries.
   /// Background isolate writes to DB but cannot notify the main isolate directly,
   /// so we poll every 2 seconds to pick up new items.
@@ -192,6 +223,30 @@ class ContentProcessingService {
     }
   }
 
+  /// Persist a retry result to the processing history DB.
+  /// Each retry gets a unique itemId so multiple retries of the same memo
+  /// each appear as separate history entries.
+  Future<void> _saveRetryHistory({
+    required Memo memo,
+    required String status,
+    String? error,
+  }) async {
+    try {
+      await _databaseService.insertProcessingHistory(ProcessingHistoryItem(
+        itemId: _uuid.v4(),
+        content: memo.title,
+        type: _memoContentType(memo),
+        status: status,
+        progress: status == 'completed' ? 1.0 : 0.0,
+        error: error,
+        memoTitle: memo.title,
+        completedAt: DateTime.now(),
+      ));
+    } catch (e) {
+      await _debug.log('CPS: Failed to save retry history: $e');
+    }
+  }
+
   /// Load processing history from DB plus native queue pending items,
   /// then emit updated state so the UI reflects current queue status.
   Future<void> loadHistoryIntoState() async {
@@ -242,10 +297,11 @@ class ContentProcessingService {
         // Native channel may not be available; fall through
       }
 
-      // 3. Merge: native active items + in-memory queue + history
+      // 3. Merge: native active items + in-memory queue + retry + history
       final combined = [
         ...nativeActiveItems,
         ..._buildActiveItemsFromMemory(),
+        ..._buildRetryItems(),
         ...historyList,
       ];
 
@@ -256,14 +312,27 @@ class ContentProcessingService {
 
       final isProcessing = nativeActiveItems.isNotEmpty ||
           _currentItem != null ||
-          _queue.isNotEmpty;
+          _queue.isNotEmpty ||
+          _retryingMemo != null ||
+          _retryQueue.isNotEmpty;
 
       // 4. Emit only if something changed
       final newHistoryOnly = historyList;
+      final activeStageChanged =
+          _currentItem != null && _currentStage != _lastEmittedActiveStage;
+      final retryStageChanged =
+          _retryingMemo != null && _retryStage != _lastEmittedRetryStage;
+      final retryQueueChanged = _retryQueue.length != _lastRetryQueueLength;
       if (!_listEquals(newHistoryOnly, _historyFromDb) ||
-          nativeActiveItems.length != _lastNativePendingCount) {
+          nativeActiveItems.length != _lastNativePendingCount ||
+          activeStageChanged ||
+          retryStageChanged ||
+          retryQueueChanged) {
         _historyFromDb = newHistoryOnly;
         _lastNativePendingCount = nativeActiveItems.length;
+        _lastEmittedActiveStage = _currentStage;
+        _lastEmittedRetryStage = _retryStage;
+        _lastRetryQueueLength = _retryQueue.length;
         if (!_stateController.isClosed) {
           _stateController.add(QueueState(
             items: combined,
@@ -290,9 +359,9 @@ class ContentProcessingService {
         id: _currentItemId ?? _uuid.v4(),
         content: _currentItem!.content,
         type: _currentItem!.type,
-        progress: 0.0,
-        stage: ProcessingStage.queued,
-        statusText: '처리 중',
+        progress: _currentProgress,
+        stage: _currentStage,
+        statusText: _currentStatusText,
         isCurrent: true,
       ));
     }
@@ -308,6 +377,50 @@ class ContentProcessingService {
       ));
     }
     return items;
+  }
+
+  /// Build active items for retry operations.
+  /// Returns one entry for the currently-executing retry plus one per queued
+  /// retry, so the QueueScreen shows the full retry pipeline.
+  List<QueueItemProgress> _buildRetryItems() {
+    final items = <QueueItemProgress>[];
+    if (_retryingMemo == null && _retryQueue.isEmpty) return items;
+
+    // Currently processing retry
+    if (_retryingMemo != null) {
+      final memo = _retryingMemo!;
+      items.add(QueueItemProgress(
+        id: 'retry-${memo.id}',
+        content: memo.title,
+        type: _memoContentType(memo),
+        progress: _retryProgress,
+        stage: _retryStage,
+        statusText: _retryStatusText,
+        isCurrent: true,
+      ));
+    }
+
+    // Queued retries (waiting their turn)
+    for (final memo in _retryQueue) {
+      items.add(QueueItemProgress(
+        id: 'retry-queued-${memo.id}',
+        content: memo.title,
+        type: _memoContentType(memo),
+        progress: 0.0,
+        stage: ProcessingStage.queued,
+        statusText: '대기 중',
+        isCurrent: false,
+      ));
+    }
+    return items;
+  }
+
+  ContentType _memoContentType(Memo memo) {
+    if (memo.youtubeVideoId != null || memo.sourceUrl != null) {
+      return ContentType.url;
+    }
+    if (memo.imagePath != null) return ContentType.image;
+    return ContentType.text;
   }
 
   /// Start a periodic timer that polls the DB for new history entries.
@@ -344,6 +457,27 @@ class ContentProcessingService {
     loadHistoryIntoState();
   }
 
+  /// Update the current item's stage/progress and emit immediately.
+  /// Stage transitions are emitted at key processing milestones so the
+  /// QueueScreen shows real-time progress (fetching → analyzing → saving).
+  void _updateProgress(ProcessingStage stage, String statusText,
+      {double? progress}) {
+    _currentStage = stage;
+    _currentStatusText = statusText;
+    _currentProgress = progress ?? stage.minProgress;
+    _emitQueueState();
+  }
+
+  /// Update the retry operation's stage/progress and emit immediately.
+  void _updateRetryProgress(ProcessingStage stage, String statusText,
+      {double? progress}) {
+    if (_retryingMemo == null) return;
+    _retryStage = stage;
+    _retryStatusText = statusText;
+    _retryProgress = progress ?? stage.minProgress;
+    _emitQueueState();
+  }
+
   /// Convenience: enqueue a URL for background processing.
   void enqueueUrl(String url) {
     enqueue(ProcessingItem(content: url, type: ContentType.url));
@@ -364,14 +498,20 @@ class ContentProcessingService {
 
     while (_queue.isNotEmpty) {
       final item = _queue.removeFirst();
-      // Set current item and emit state so UI shows "processing"
+      // Reset progress tracking for new item
       _currentItem = item;
       _currentItemId = _uuid.v4();
+      _currentStage = ProcessingStage.fetchingContent;
+      _currentProgress = ProcessingStage.fetchingContent.minProgress;
+      _currentStatusText = stageLabel(ProcessingStage.fetchingContent, item.type);
       _emitQueueState();
       await processItem(item, itemId: _currentItemId);
-      // Clear current item
+      // Clear current item and reset progress
       _currentItem = null;
       _currentItemId = null;
+      _currentStage = ProcessingStage.queued;
+      _currentProgress = 0.0;
+      _currentStatusText = '';
     }
 
     _isProcessing = false;
@@ -397,6 +537,9 @@ class ContentProcessingService {
 
   Future<String> _processYouTube(String videoId, String url) async {
     await _debug.log('CPS: YouTube video: $videoId');
+
+    // Stage: fetchingContent (already set by _processNext)
+
     final videoInfo = await _youtubeService.getVideoInfo(videoId);
     if (videoInfo == null) {
       // Fallback: save raw URL
@@ -416,12 +559,19 @@ class ContentProcessingService {
 
     final extractedContent = videoInfoWithTranscript.buildContentForAi();
 
+    // Stage: analyzing — AI analysis
+    _updateProgress(ProcessingStage.analyzing, 'AI 요약 중',
+        progress: ProcessingStage.analyzing.minProgress);
+
     try {
       final result = await _aiService.analyzeContent(
         content: extractedContent,
         sourceUrl: url,
         youtubeVideoId: videoId,
       );
+
+      // Stage: saving — persist to DB
+      _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty ? result.title : videoInfo.title;
       await _databaseService.insertMemo(Memo(
@@ -437,6 +587,7 @@ class ContentProcessingService {
     } catch (e) {
       // AI failed — save with raw transcript data
       await _debug.log('CPS: YouTube AI failed ($e), saving fallback');
+      _updateProgress(ProcessingStage.saving, '저장 중');
       await _databaseService.insertMemo(Memo(
         title: videoInfo.title,
         content: extractedContent,
@@ -451,6 +602,9 @@ class ContentProcessingService {
 
   Future<String> _processTikTok(String url) async {
     await _debug.log('CPS: TikTok URL: $url');
+
+    // Stage: fetchingContent (already set by _processNext)
+
     final tiktokInfo = await _tiktokService.getVideoInfo(url);
     if (tiktokInfo == null) {
       return _saveFallback(url, '기타');
@@ -458,11 +612,18 @@ class ContentProcessingService {
 
     final extractedContent = tiktokInfo.buildContentForAi();
 
+    // Stage: analyzing — AI analysis
+    _updateProgress(ProcessingStage.analyzing, 'AI 요약 중',
+        progress: ProcessingStage.analyzing.minProgress);
+
     try {
       final result = await _aiService.analyzeContent(
         content: extractedContent,
         sourceUrl: url,
       );
+
+      // Stage: saving — persist to DB
+      _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty ? result.title : tiktokInfo.title;
       await _databaseService.insertMemo(Memo(
@@ -476,6 +637,7 @@ class ContentProcessingService {
       return title;
     } catch (e) {
       await _debug.log('CPS: TikTok AI failed ($e), saving fallback');
+      _updateProgress(ProcessingStage.saving, '저장 중');
       await _databaseService.insertMemo(Memo(
         title: tiktokInfo.title,
         content: extractedContent,
@@ -489,6 +651,8 @@ class ContentProcessingService {
 
   Future<String> _processWebPage(String url) async {
     await _debug.log('CPS: Web page: $url');
+
+    // Stage: fetchingContent (already set by _processNext)
 
     String? extractedContent;
     String? pageTitle;
@@ -544,6 +708,10 @@ class ContentProcessingService {
         ? '${extractedContent.substring(0, 3000)}\n\n[...이하 생략...]'
         : extractedContent;
 
+    // Stage: analyzing — AI analysis
+    _updateProgress(ProcessingStage.analyzing, 'AI 요약 중',
+        progress: ProcessingStage.analyzing.minProgress);
+
     try {
       final result = await _aiService.analyzeContent(
         content: aiContent,
@@ -565,6 +733,9 @@ class ContentProcessingService {
         }
       }
 
+      // Stage: saving — persist to DB
+      _updateProgress(ProcessingStage.saving, '저장 중');
+
       final title = result.title.isNotEmpty ? result.title : finalTitle;
       await _databaseService.insertMemo(Memo(
         title: title,
@@ -576,6 +747,7 @@ class ContentProcessingService {
       return title;
     } catch (e) {
       await _debug.log('CPS: Web AI failed ($e), saving fallback');
+      _updateProgress(ProcessingStage.saving, '저장 중');
       final detected = CategoryDetector.detect(extractedContent);
       final truncated = extractedContent.length > 500
           ? '${extractedContent.substring(0, 500)}\n\n📌 AI 요약에 실패했습니다.'
@@ -608,8 +780,14 @@ class ContentProcessingService {
       return item.fallbackTitle ?? '메모';
     }
 
+    // Stage: analyzing — AI analysis
+    _updateProgress(ProcessingStage.analyzing, 'AI 요약 중');
+
     try {
       final result = await _aiService.analyzeContent(content: content);
+
+      // Stage: saving — persist to DB
+      _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty
           ? result.title
@@ -623,6 +801,7 @@ class ContentProcessingService {
       return title;
     } catch (e) {
       await _debug.log('CPS: Text AI failed ($e), saving raw');
+      _updateProgress(ProcessingStage.saving, '저장 중');
       await _databaseService.insertMemo(Memo(
         title: item.fallbackTitle ?? '메모',
         content: content,
@@ -639,6 +818,8 @@ class ContentProcessingService {
   Future<String> _processImage(String imageUri) async {
     await _debug.log('CPS: Processing image: $imageUri');
 
+    // Stage: fetchingContent (already set by _processNext) — OCR is the "fetch" phase
+
     final queue = BackgroundQueueService();
     final ocrResult = await queue.performOcr(imageUri);
     final localImagePath = ocrResult.localImagePath;
@@ -647,8 +828,12 @@ class ContentProcessingService {
       await _debug.log('CPS: OCR found text (${ocrResult.text!.length} chars)');
 
       if (await _llmService.isAvailable()) {
+        // Stage: analyzing — AI analysis
+        _updateProgress(ProcessingStage.analyzing, 'AI 요약 중');
         try {
           final result = await _aiService.analyzeContent(content: ocrResult.text!);
+          // Stage: saving — persist to DB
+          _updateProgress(ProcessingStage.saving, '저장 중');
           final title = result.title.isNotEmpty
               ? result.title
               : '이미지 메모';
@@ -665,6 +850,7 @@ class ContentProcessingService {
         }
       }
 
+      _updateProgress(ProcessingStage.saving, '저장 중');
       await _databaseService.insertMemo(Memo(
         title: '이미지 메모',
         content: ocrResult.text!,
@@ -675,6 +861,7 @@ class ContentProcessingService {
     }
 
     await _debug.log('CPS: No text found in image');
+    _updateProgress(ProcessingStage.saving, '저장 중');
     await _databaseService.insertMemo(Memo(
       title: '이미지 메모',
       content: '📷 이미지가 공유되었습니다.\n\n이 이미지에서 인식된 텍스트가 없습니다.',
@@ -702,29 +889,101 @@ class ContentProcessingService {
   /// category in the database. Returns the updated [Memo], or null if retry
   /// is not applicable (e.g. image-only with no text).
   ///
-  /// For URL-based memos the original URL is re-fetched; for text memos the
-  /// current [Memo.content] is used as the AI input.
+  /// Retries are processed **sequentially** via an internal queue. If another
+  /// retry is already in progress, this call is queued and processed after the
+  /// current one finishes. This prevents concurrent AI inference that would
+  /// crash the local model and avoids shared-field corruption.
+  ///
+  /// On completion a [ProcessingResult] is emitted via [onItemProcessed] so
+  /// HomeScreen (and other listeners) can refresh automatically.
   Future<Memo?> retryMemo(Memo memo) async {
     await _debug.log('CPS: Retrying memo id=${memo.id}');
 
-    // ── 1. Decide processing strategy ──
-    if (memo.youtubeVideoId != null && memo.sourceUrl != null) {
-      // YouTube: re-fetch transcript + re-analyze
-      return _retryYouTube(memo, memo.sourceUrl!);
-    } else if (memo.sourceUrl != null) {
-      // Generic URL or TikTok
-      return _retryUrl(memo, memo.sourceUrl!);
-    } else if (memo.imagePath != null) {
-      // Re-process image (OCR + AI analysis)
-      return _retryImage(memo);
-    } else {
-      // Plain text: use current content as AI input
-      return _retryText(memo);
+    // If a retry is already running, queue this one for later.
+    if (_isRetryLock) {
+      await _debug.log('CPS: Retry busy — queuing memo id=${memo.id}');
+      _retryQueue.add(memo);
+      _emitQueueState(); // Immediately show the queued item in QueueScreen
+      return null;
+    }
+
+    _isRetryLock = true;
+
+    try {
+      // Process all queued retries sequentially
+      await _processSingleRetry(memo);
+      while (_retryQueue.isNotEmpty) {
+        final next = _retryQueue.removeAt(0);
+        await _debug.log('CPS: Processing queued retry id=${next.id}');
+        await _processSingleRetry(next);
+      }
+    } finally {
+      _isRetryLock = false;
+      _retryingMemo = null;
+      _retryStage = ProcessingStage.queued;
+      _retryProgress = 0.0;
+      _retryStatusText = '';
+      _emitQueueState();
+    }
+    return null;
+  }
+
+  /// Execute one retry with progress tracking and result emission.
+  Future<void> _processSingleRetry(Memo memo) async {
+    _retryingMemo = memo;
+    _retryStage = ProcessingStage.fetchingContent;
+    _retryProgress = ProcessingStage.fetchingContent.minProgress;
+    _retryStatusText = 'AI 재요약 중';
+    _emitQueueState();
+
+    try {
+      Memo? updated;
+      if (memo.youtubeVideoId != null && memo.sourceUrl != null) {
+        updated = await _retryYouTube(memo, memo.sourceUrl!);
+      } else if (memo.sourceUrl != null) {
+        updated = await _retryUrl(memo, memo.sourceUrl!);
+      } else if (memo.imagePath != null) {
+        updated = await _retryImage(memo);
+      } else {
+        updated = await _retryText(memo);
+      }
+
+      // Persist retry result to history DB
+      await _saveRetryHistory(
+        memo: memo,
+        status: updated != null ? 'completed' : 'failed',
+      );
+
+      if (updated != null && !_resultController.isClosed) {
+        _resultController.add(ProcessingResult(
+          success: true,
+          title: updated.title,
+        ));
+      }
+    } catch (e, stack) {
+      await _debug.log('CPS: Retry failed: $e\n$stack');
+
+      // Persist failure to history DB
+      await _saveRetryHistory(
+        memo: memo,
+        status: 'failed',
+        error: e.toString(),
+      );
+
+      if (!_resultController.isClosed) {
+        _resultController.add(ProcessingResult(
+          success: false,
+          error: e.toString(),
+        ));
+      }
     }
   }
 
   Future<Memo> _retryYouTube(Memo memo, String url) async {
     final videoId = memo.youtubeVideoId!;
+
+    // Stage: fetchingContent (already set in retryMemo)
+
     final videoInfo = await _youtubeService.getVideoInfo(videoId);
     if (videoInfo == null) return memo; // Keep original
 
@@ -739,11 +998,19 @@ class ContentProcessingService {
     );
 
     final extractedContent = videoInfoWithTranscript.buildContentForAi();
+
+    // Stage: analyzing — AI analysis
+    _updateRetryProgress(ProcessingStage.analyzing, 'AI 재요약 중',
+        progress: ProcessingStage.analyzing.minProgress);
+
     final result = await _aiService.analyzeContent(
       content: extractedContent,
       sourceUrl: url,
       youtubeVideoId: videoId,
     );
+
+    // Stage: saving — persist to DB
+    _updateRetryProgress(ProcessingStage.saving, '저장 중');
 
     final title = result.title.isNotEmpty ? result.title : videoInfo.title;
     final updated = memo.copyWith(
@@ -762,6 +1029,8 @@ class ContentProcessingService {
     String? extractedContent;
     String? pageTitle;
 
+    // Stage: fetchingContent (already set in retryMemo)
+
     final pageInfo = await _webPageService.fetchPageContent(url);
     if (pageInfo != null && pageInfo.textContent.isNotEmpty) {
       pageTitle = pageInfo.title;
@@ -778,6 +1047,10 @@ class ContentProcessingService {
     final aiContent = extractedContent.length > 3000
         ? '${extractedContent.substring(0, 3000)}\n\n[...이하 생략...]'
         : extractedContent;
+
+    // Stage: analyzing — AI analysis
+    _updateRetryProgress(ProcessingStage.analyzing, 'AI 재요약 중',
+        progress: ProcessingStage.analyzing.minProgress);
 
     final result = await _aiService.analyzeContent(
       content: aiContent,
@@ -797,6 +1070,9 @@ class ContentProcessingService {
       }
     }
 
+    // Stage: saving — persist to DB
+    _updateRetryProgress(ProcessingStage.saving, '저장 중');
+
     final title = result.title.isNotEmpty ? result.title : (pageTitle ?? url);
     final updated = memo.copyWith(
       title: title,
@@ -812,9 +1088,15 @@ class ContentProcessingService {
     final content = memo.content;
     if (!await _llmService.isAvailable()) return memo;
 
-    final result = await _aiService.analyzeContent(content: content);
-    final title = result.title.isNotEmpty ? result.title : memo.title;
+    // Stage: analyzing — AI analysis
+    _updateRetryProgress(ProcessingStage.analyzing, 'AI 재요약 중');
 
+    final result = await _aiService.analyzeContent(content: content);
+
+    // Stage: saving — persist to DB
+    _updateRetryProgress(ProcessingStage.saving, '저장 중');
+
+    final title = result.title.isNotEmpty ? result.title : memo.title;
     final updated = memo.copyWith(
       title: title,
       content: result.content.isNotEmpty ? result.content : content,
@@ -828,6 +1110,9 @@ class ContentProcessingService {
   Future<Memo> _retryImage(Memo memo) async {
     final imagePath = memo.imagePath!;
     final queue = BackgroundQueueService();
+
+    // Stage: fetchingContent (already set in retryMemo) — OCR phase
+
     final ocrResult = await queue.performOcr(imagePath);
 
     if (ocrResult.text == null || ocrResult.text!.isEmpty) {
@@ -835,7 +1120,14 @@ class ContentProcessingService {
     }
 
     if (await _llmService.isAvailable()) {
+      // Stage: analyzing — AI analysis
+      _updateRetryProgress(ProcessingStage.analyzing, 'AI 재요약 중');
+
       final result = await _aiService.analyzeContent(content: ocrResult.text!);
+
+      // Stage: saving — persist to DB
+      _updateRetryProgress(ProcessingStage.saving, '저장 중');
+
       final title = result.title.isNotEmpty ? result.title : memo.title;
       final updated = memo.copyWith(
         title: title,

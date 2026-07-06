@@ -25,7 +25,6 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
   Memo? _memo;
   bool _isLoading = true;
   bool _isEditing = false;
-  bool _isRetrying = false;
 
   late TextEditingController _titleController;
   late TextEditingController _contentController;
@@ -144,7 +143,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
   }
 
   Future<void> _retryAnalysis() async {
-    if (_memo == null || _isRetrying) return;
+    if (_memo == null) return;
 
     // Check AI availability
     final llm = LlmService();
@@ -157,37 +156,20 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
       return;
     }
 
-    setState(() => _isRetrying = true);
+    // Fire retry in background without awaiting — the user can freely
+    // navigate away (back / home) while retry completes.
+    // HomeScreen will auto-refresh via onItemProcessed stream.
+    _processingService.retryMemo(_memo!);
 
-    try {
-      final updated = await _processingService.retryMemo(_memo!);
-      if (mounted) {
-        setState(() {
-          _memo = updated;
-          _isRetrying = false;
-          if (updated != null) {
-            _titleController.text = updated.title;
-            _contentController.text = updated.content;
-            _categoryController.text = updated.category;
-          }
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('✅ AI 재요약이 완료되었습니다.'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _isRetrying = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('❌ 재요약 실패: $e'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🔄 AI 재요약이 백그라운드에서 실행됩니다. 완료 후 자동 반영됩니다.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      // Return to home screen
+      Navigator.pop(context, true);
     }
   }
 
@@ -255,28 +237,9 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_isEditing
-            ? '메모 편집'
-            : _isRetrying
-                ? 'AI 재요약 중...'
-                : '메모 상세'),
+        title: Text(_isEditing ? '메모 편집' : '메모 상세'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
-          if (_isRetrying)
-            Padding(
-              padding: const EdgeInsets.only(right: 12),
-              child: Center(
-                child: SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
-                ),
-              ),
-            )
-          else
           if (_isEditing) ...[
             IconButton(
               icon: const Icon(Icons.close),
@@ -297,7 +260,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
             IconButton(
               icon: const Icon(Icons.refresh),
               tooltip: 'AI 재요약',
-              onPressed: _isRetrying ? null : _retryAnalysis,
+              onPressed: _retryAnalysis,
             ),
             IconButton(
               icon: const Icon(Icons.edit_outlined),
@@ -312,9 +275,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
           ],
         ],
       ),
-      body: Stack(
-        children: [
-          SingleChildScrollView(
+      body: SingleChildScrollView(
             padding: const EdgeInsets.all(16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -502,37 +463,6 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
               ),
           ],
         ),
-      ),
-
-          // Loading overlay when retrying
-          if (_isRetrying)
-            Container(
-              color: Colors.black.withValues(alpha: 0.15),
-              child: const Center(
-                child: Card(
-                  child: Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        CircularProgressIndicator(),
-                        SizedBox(height: 16),
-                        Text(
-                          'AI 재요약 중...',
-                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
-                        ),
-                        SizedBox(height: 4),
-                        Text(
-                          '로컬 모델로 내용을 분석하고 있습니다',
-                          style: TextStyle(fontSize: 12, color: Colors.grey),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
       ),
     );
   }
