@@ -1081,8 +1081,6 @@ class ContentProcessingService {
         }
       }
     } finally {
-      // Ensure retry lock is released even on cancellation
-      _isRetryLock = false;
       _retryingMemo = null;
       _retryStage = ProcessingStage.queued;
       _retryProgress = 0.0;

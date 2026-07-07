@@ -212,6 +212,62 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     }
   }
 
+  void _showLinkAction(String url) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            // Handle bar
+            Container(
+              width: 32,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey[300],
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              '링크 열기',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
+            const SizedBox(height: 16),
+            ListTile(
+              leading: const Icon(Icons.copy),
+              title: const Text('클립보드에 복사'),
+              onTap: () {
+                Clipboard.setData(ClipboardData(text: url));
+                Navigator.pop(ctx);
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('링크가 클립보드에 복사되었습니다')),
+                  );
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.open_in_browser),
+              title: const Text('다른 브라우저에서 열기'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _openUrl(url);
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -366,16 +422,15 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
                 color: Colors.blue[50],
                 shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12)),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(12),
-                  onTap: () => _openUrl(memo.sourceUrl!),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Row(
-                      children: [
-                        Icon(Icons.link, color: Colors.blue[600], size: 20),
-                        const SizedBox(width: 8),
-                        Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      Icon(Icons.link, color: Colors.blue[600], size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: () => _showLinkAction(memo.sourceUrl!),
                           child: Text(
                             memo.sourceUrl!,
                             style: TextStyle(
@@ -387,10 +442,17 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        Icon(Icons.open_in_new,
-                            color: Colors.blue[400], size: 18),
-                      ],
-                    ),
+                      ),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(20),
+                        onTap: () => _openUrl(memo.sourceUrl!),
+                        child: Padding(
+                          padding: const EdgeInsets.all(4),
+                          child: Icon(Icons.open_in_new,
+                              color: Colors.blue[400], size: 18),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
