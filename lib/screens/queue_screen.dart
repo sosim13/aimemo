@@ -290,7 +290,7 @@ class _QueueScreenState extends State<QueueScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Top row: emoji + preview + %
+              // Top row: emoji + preview + % + cancel button
               Row(
                 children: [
                   Text(item.typeEmoji, style: const TextStyle(fontSize: 15)),
@@ -315,6 +315,23 @@ class _QueueScreenState extends State<QueueScreen> {
                       color: _activeProgressColor(item),
                     ),
                   ),
+                  if (isCurrent) ...[
+                    const SizedBox(width: 4),
+                    SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: IconButton(
+                        padding: EdgeInsets.zero,
+                        iconSize: 16,
+                        icon: const Icon(Icons.close),
+                        color: Colors.red[400],
+                        tooltip: '취소',
+                        onPressed: () async {
+                          await _processingService.cancelCurrentItem();
+                        },
+                      ),
+                    ),
+                  ],
                 ],
               ),
               const SizedBox(height: 8),
@@ -510,6 +527,22 @@ class _QueueScreenState extends State<QueueScreen> {
                   ],
                 ),
               ),
+              // Retry button for failed items
+              if (!isSuccess)
+                SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    iconSize: 18,
+                    icon: const Icon(Icons.refresh),
+                    color: Colors.orange[400],
+                    tooltip: '재시도',
+                    onPressed: () {
+                      _processingService.retryFromHistory(item);
+                    },
+                  ),
+                ),
             ],
           ),
         ),

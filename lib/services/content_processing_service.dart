@@ -133,6 +133,10 @@ class ContentProcessingService {
   final List<Memo> _retryQueue = [];
   bool _isRetryLock = false;
 
+  /// Set when the user explicitly cancels the current operation.
+  /// Checked by [processItem] and [cancelCurrentItem] to avoid double-saving.
+  bool _userCancelled = false;
+
   /// Periodic timer that polls DB for new history entries.
   /// Background isolate writes to DB but cannot notify the main isolate directly,
   /// so we poll every 2 seconds to pick up new items.
@@ -151,6 +155,54 @@ class ContentProcessingService {
   }
 
   final _uuid = const Uuid();
+
+  /// Cancel the currently processing item or retry.
+  /// Saves a "사용자가 취소" failed entry to history and clears all pending queues.
+  Future<void> cancelCurrentItem() async {
+    _userCancelled = true;
+
+    // 1. Abort the LLM provider
+    _llmService.cancel();
+
+    // 2. Save current processing item as failed
+    if (_currentItem != null && _currentItemId != null) {
+      await _saveHistory(
+        itemId: _currentItemId!,
+        content: _currentItem!.content,
+        type: _currentItem!.type,
+        status: 'failed',
+        error: '사용자가 처리를 취소했습니다.',
+      );
+    }
+
+    // 3. Save current retry as failed
+    if (_retryingMemo != null) {
+      await _saveRetryHistory(
+        memo: _retryingMemo!,
+        status: 'failed',
+        error: '사용자가 처리를 취소했습니다.',
+      );
+    }
+
+    // 4. Clear all pending queues
+    _queue.clear();
+    _retryQueue.clear();
+    _isRetryLock = false;
+
+    // 5. Reset state
+    _currentItem = null;
+    _currentItemId = null;
+    _currentStage = ProcessingStage.queued;
+    _currentProgress = 0.0;
+    _currentStatusText = '';
+    _retryingMemo = null;
+    _retryStage = ProcessingStage.queued;
+    _retryProgress = 0.0;
+    _retryStatusText = '';
+    _isProcessing = false;
+
+    _emitQueueState();
+  }
 
   Future<ProcessingResult> processItem(ProcessingItem item,
       {String? itemId}) async {
@@ -178,6 +230,17 @@ class ContentProcessingService {
 
       return result;
     } catch (e, stack) {
+      // If the user explicitly cancelled, skip saving (cancelCurrentItem
+      // already saved the failed entry) and avoid noisy logs.
+      if (_userCancelled) {
+        _userCancelled = false;
+        await _debug.log('CPS: Processing cancelled by user');
+        final result = ProcessingResult(success: false, error: '사용자가 처리를 취소했습니다.');
+        _resultController.add(result);
+        _emitQueueState();
+        return result;
+      }
+
       await _debug.log('CPS: Processing failed: $e\n$stack');
       final result = ProcessingResult(success: false, error: e.toString());
       _resultController.add(result);
@@ -932,6 +995,31 @@ class ContentProcessingService {
     return null;
   }
 
+  /// Retry a failed history entry by re-queueing it for processing.
+  /// If the history item has a [memoId], delegates to [retryMemo] to update
+  /// the existing memo in-place. Otherwise enqueues as a brand-new item.
+  void retryFromHistory(QueueItemProgress historyItem) {
+    if (historyItem.memoId != null) {
+      // Fetch the memo and trigger retry
+      unawaited(_retryFromHistoryWithMemo(historyItem));
+    } else {
+      // No memoId — enqueue as fresh item
+      enqueue(ProcessingItem(
+        content: historyItem.content,
+        type: historyItem.type,
+      ));
+    }
+  }
+
+  Future<void> _retryFromHistoryWithMemo(QueueItemProgress historyItem) async {
+    // If the item has a memoId, load the memo from DB and retry it in-place
+    if (historyItem.memoId == null) return;
+    final memo = await _databaseService.getMemoById(historyItem.memoId!);
+    if (memo != null) {
+      await retryMemo(memo);
+    }
+  }
+
   /// Execute one retry with progress tracking and result emission.
   Future<void> _processSingleRetry(Memo memo) async {
     _retryingMemo = memo;
@@ -965,21 +1053,40 @@ class ContentProcessingService {
         ));
       }
     } catch (e, stack) {
-      await _debug.log('CPS: Retry failed: $e\n$stack');
+      // If the user explicitly cancelled, skip saving (cancelCurrentItem
+      // already saved the failed entry).
+      if (_userCancelled) {
+        _userCancelled = false;
+        await _debug.log('CPS: Retry cancelled by user');
+        if (!_resultController.isClosed) {
+          _resultController.add(ProcessingResult(
+            success: false,
+            error: '사용자가 처리를 취소했습니다.',
+          ));
+        }
+      } else {
+        await _debug.log('CPS: Retry failed: $e\n$stack');
 
-      // Persist failure to history DB
-      await _saveRetryHistory(
-        memo: memo,
-        status: 'failed',
-        error: e.toString(),
-      );
-
-      if (!_resultController.isClosed) {
-        _resultController.add(ProcessingResult(
-          success: false,
+        await _saveRetryHistory(
+          memo: memo,
+          status: 'failed',
           error: e.toString(),
-        ));
+        );
+
+        if (!_resultController.isClosed) {
+          _resultController.add(ProcessingResult(
+            success: false,
+            error: e.toString(),
+          ));
+        }
       }
+    } finally {
+      // Ensure retry lock is released even on cancellation
+      _isRetryLock = false;
+      _retryingMemo = null;
+      _retryStage = ProcessingStage.queued;
+      _retryProgress = 0.0;
+      _retryStatusText = '';
     }
   }
 

@@ -3,6 +3,13 @@ import 'package:flutter_gemma/flutter_gemma.dart';
 import 'llm_provider.dart';
 import 'gemma_diag.dart';
 
+/// Thrown when the user explicitly cancels a running analysis/chat.
+class UserCancelledException implements Exception {
+  final String message = '사용자가 처리를 취소했습니다.';
+  @override
+  String toString() => message;
+}
+
 /// Model entry for flutter_gemma
 class _GemmaModel {
   final String id;
@@ -249,6 +256,14 @@ class GemmaProvider implements LlmProvider {
       await _session!.addQueryChunk(Message.text(text: prompt, isUser: true));
       final response = await _session!.getResponse();
 
+      // Check if user cancelled during generation (session may have been
+      // closed by cancel(), causing getResponse() to throw — but in case
+      // it didn't throw, check the flag explicitly).
+      if (_cancelled) {
+        _cancelled = false;
+        throw UserCancelledException();
+      }
+
       if (response.trim().isEmpty) {
         throw Exception('AI가 응답을 생성하지 못했습니다 (빈 결과).');
       }
@@ -259,9 +274,18 @@ class GemmaProvider implements LlmProvider {
         youtubeVideoId: youtubeVideoId,
         originalContent: content,
       );
+    } catch (e) {
+      // If the session was closed by cancel(), convert to a clean error
+      if (_cancelled) {
+        _cancelled = false;
+        throw UserCancelledException();
+      }
+      rethrow;
     } finally {
-      await _session?.close();
-      _session = null;
+      if (_session != null) {
+        await _session!.close();
+        _session = null;
+      }
     }
   }
 
@@ -342,6 +366,12 @@ class GemmaProvider implements LlmProvider {
   void cancel() {
     GemmaDiag.logSync('cancel() called');
     _cancelled = true;
+    // Abort any running analyze session
+    _session?.close();
+    _session = null;
+    // Abort any running chat session
+    _chatSession?.close();
+    _chatSession = null;
   }
 
   Future<void> _closeEngine() async {
