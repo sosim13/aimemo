@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/queue_state.dart';
 import '../services/content_processing_service.dart';
 import '../services/database_service.dart';
+import 'memo_detail_screen.dart';
 
 class QueueScreen extends StatefulWidget {
   const QueueScreen({super.key});
@@ -377,19 +378,45 @@ class _QueueScreenState extends State<QueueScreen> {
   // History item tile (completed / failed)
   // ---------------------------------------------------------------------------
 
+  Future<void> _onHistoryItemTap(QueueItemProgress item) async {
+    int? memoId = item.memoId;
+
+    // If no stored memoId, try to resolve by title
+    if (memoId == null && item.memoTitle != null) {
+      memoId = await _databaseService.getMemoIdByTitle(item.memoTitle!);
+    }
+
+    if (memoId == null || !mounted) return;
+
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MemoDetailScreen(memoId: memoId!),
+      ),
+    );
+    if (changed == true) {
+      // Memo was deleted — refresh queue state to keep in sync
+      await _processingService.loadHistoryIntoState();
+    }
+  }
+
   Widget _buildHistoryItemTile(QueueItemProgress item) {
     final isSuccess = item.stage == ProcessingStage.completed;
     final timeStr = _formatTime(item.completedAt);
+    final canOpen = isSuccess && (item.memoId != null || item.memoTitle != null);
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
       child: Card(
-        elevation: 0,
+        elevation: canOpen ? 0.5 : 0,
         color: Theme.of(context).colorScheme.surfaceContainerLow,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(8),
         ),
-        child: Padding(
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: canOpen ? () => _onHistoryItemTap(item) : null,
+          child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -487,7 +514,8 @@ class _QueueScreenState extends State<QueueScreen> {
           ),
         ),
       ),
-    );
+    ),
+  );
   }
 
   /// Format a DateTime to a short relative time string.

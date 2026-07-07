@@ -221,7 +221,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 children: [
-                  _buildCategoryChip('전체', null),
+                  _buildCategoryChip('전체 (${_memos.length})', null),
                   ..._categoryCounts.entries.map((entry) {
                     return _buildCategoryChip(
                       '${entry.key} (${entry.value})',

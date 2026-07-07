@@ -22,7 +22,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -99,6 +99,11 @@ class DatabaseService {
       await db.execute('''
         CREATE INDEX IF NOT EXISTS idx_history_created_at ON processing_history(createdAt)
       ''');
+    }
+    if (oldVersion < 4) {
+      await db.execute(
+        'ALTER TABLE processing_history ADD COLUMN memoId INTEGER',
+      );
     }
   }
 
@@ -216,6 +221,22 @@ class DatabaseService {
   Future<int> clearAllProcessingHistory() async {
     final db = await database;
     return await db.delete('processing_history');
+  }
+
+  /// Find the most recently created memo with the given title.
+  /// Used when a ProcessingHistoryItem has no memoId stored (legacy records).
+  Future<int?> getMemoIdByTitle(String title) async {
+    final db = await database;
+    final maps = await db.query(
+      'memos',
+      columns: ['id'],
+      where: 'title = ?',
+      whereArgs: [title],
+      orderBy: 'createdAt DESC',
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return maps.first['id'] as int?;
   }
 
   Future<int> getProcessingHistoryCount() async {

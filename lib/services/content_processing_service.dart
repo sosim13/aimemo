@@ -206,6 +206,7 @@ class ContentProcessingService {
     required String status,
     String? memoTitle,
     String? error,
+    int? memoId,
   }) async {
     try {
       await _databaseService.insertProcessingHistory(ProcessingHistoryItem(
@@ -216,6 +217,7 @@ class ContentProcessingService {
         progress: status == 'completed' ? 1.0 : 0.0,
         error: error,
         memoTitle: memoTitle,
+        memoId: memoId,
         completedAt: DateTime.now(),
       ));
     } catch (e) {
@@ -240,6 +242,7 @@ class ContentProcessingService {
         progress: status == 'completed' ? 1.0 : 0.0,
         error: error,
         memoTitle: memo.title,
+        memoId: memo.id,
         completedAt: DateTime.now(),
       ));
     } catch (e) {
@@ -265,6 +268,7 @@ class ContentProcessingService {
             isCurrent: false,
             error: h.error,
             memoTitle: h.memoTitle,
+            memoId: h.memoId,
             completedAt: h.completedAt,
           ));
       final historyList = historyItems.toList();

@@ -70,6 +70,9 @@ class QueueItemProgress {
   final String? error;
   final String? memoTitle; // Title of memo created (if success)
 
+  /// The memo id this history entry links to (if known).
+  final int? memoId;
+
   /// When the item reached a terminal stage (completed/failed).
   /// null if still pending/processing.
   final DateTime? completedAt;
@@ -84,6 +87,7 @@ class QueueItemProgress {
     this.isCurrent = false,
     this.error,
     this.memoTitle,
+    this.memoId,
     this.completedAt,
   });
 
@@ -97,6 +101,7 @@ class QueueItemProgress {
     bool? isCurrent,
     String? error,
     String? memoTitle,
+    int? memoId,
     DateTime? completedAt,
   }) {
     return QueueItemProgress(
@@ -109,6 +114,7 @@ class QueueItemProgress {
       isCurrent: isCurrent ?? this.isCurrent,
       error: error ?? this.error,
       memoTitle: memoTitle ?? this.memoTitle,
+      memoId: memoId ?? this.memoId,
       completedAt: completedAt ?? this.completedAt,
     );
   }
@@ -139,6 +145,10 @@ class ProcessingHistoryItem {
   final double progress;
   final String? error;
   final String? memoTitle;
+
+  /// The memo id this history entry produced (null for legacy records).
+  final int? memoId;
+
   final DateTime createdAt;
   final DateTime? completedAt;
 
@@ -151,6 +161,7 @@ class ProcessingHistoryItem {
     this.progress = 1.0,
     this.error,
     this.memoTitle,
+    this.memoId,
     DateTime? createdAt,
     this.completedAt,
   }) : createdAt = createdAt ?? DateTime.now();
@@ -168,6 +179,7 @@ class ProcessingHistoryItem {
         'progress': progress,
         'error': error,
         'memoTitle': memoTitle,
+        'memoId': memoId,
         'createdAt': createdAt.toIso8601String(),
         'completedAt': completedAt?.toIso8601String(),
       };
@@ -186,6 +198,7 @@ class ProcessingHistoryItem {
       progress: (map['progress'] as num?)?.toDouble() ?? 1.0,
       error: map['error'] as String?,
       memoTitle: map['memoTitle'] as String?,
+      memoId: map['memoId'] as int?,
       createdAt: DateTime.parse(map['createdAt'] as String),
       completedAt: map['completedAt'] != null
           ? DateTime.parse(map['completedAt'] as String)
