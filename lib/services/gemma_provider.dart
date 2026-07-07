@@ -210,6 +210,14 @@ class GemmaProvider implements LlmProvider {
     GemmaDiag.logSync('selectModel OK: $modelName (initialized=true)');
   }
 
+  /// Maximum characters of content to send to the model.
+  /// Long videos/transcripts are truncated to this size before analysis to avoid
+  /// "INVALID_ARGUMENT: Input token ids" errors when content exceeds the model's
+  /// context window. On-device models typically have 2K~8K token limits; with
+  /// Korean text (~2 chars per token) plus the prompt template (~500 tokens),
+  /// 1500 chars leaves enough room for the response.
+  static const int _maxContentChars = 1500;
+
   @override
   Future<AiAnalysisResult> analyze({
     required String content,
@@ -221,6 +229,12 @@ class GemmaProvider implements LlmProvider {
       final msg = 'Gemma 엔진이 초기화되지 않았습니다. 모델을 먼저 선택해주세요.';
       GemmaDiag.logSync('analyze FAIL: $msg');
       throw Exception(msg);
+    }
+
+    // Truncate content if too long for the model's context window
+    if (content.length > _maxContentChars) {
+      GemmaDiag.logSync('Content too long (${content.length} chars), truncating to $_maxContentChars');
+      content = '${content.substring(0, _maxContentChars)}\n\n[...원본 내용이 너무 길어 앞부분 ${_maxContentChars}자만 분석했습니다. 뒷부분은 생략되었습니다.]';
     }
 
     final prompt = _buildPrompt(content, sourceUrl: sourceUrl);
