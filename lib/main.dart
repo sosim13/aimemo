@@ -7,9 +7,11 @@ import 'services/llm_service.dart';
 import 'services/debug_logger.dart';
 import 'services/background_queue_service.dart';
 import 'services/content_processing_service.dart';
+import 'services/secure_storage_service.dart';
 import 'screens/home_screen.dart';
 import 'screens/queue_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/map_screen.dart';
 import 'screens/memo_input_screen.dart';
 import 'screens/memo_detail_screen.dart';
 import 'screens/url_processing_screen.dart';
@@ -33,6 +35,24 @@ void main() async {
 
   // Initialize LLM service (load saved settings)
   await LlmService().init();
+
+  // Initialize API keys if not already stored
+  final secureStorage = SecureStorageService();
+
+  // Kakao REST API key: provided by user, stored once
+  if (await secureStorage.getKakaoRestApiKey() == null) {
+    await secureStorage.saveKakaoRestApiKey('2df99702c2f066873c6525cd2c62105d');
+  }
+
+  // Naver Client ID
+  if (await secureStorage.getNaverClientId() == null) {
+    await secureStorage.saveNaverClientId('14d00nos0m');
+  }
+
+  // Naver Client Secret
+  if (await secureStorage.getNaverClientSecret() == null) {
+    await secureStorage.saveNaverClientSecret('aNPC4VRfpV8tSgSMI7OtYMwRCfOrNhya6qhRaMQP');
+  }
 
   runApp(const AimemoApp());
 }
@@ -169,6 +189,7 @@ class _MainShellState extends State<MainShell> {
         children: const [
           HomeScreen(),
           QueueScreen(),
+          MapScreen(),
           SettingsScreen(),
         ],
       ),
@@ -189,6 +210,11 @@ class _MainShellState extends State<MainShell> {
               icon: Icon(Icons.hourglass_bottom_outlined),
               selectedIcon: Icon(Icons.hourglass_bottom),
               label: '처리현황',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.map_outlined),
+              selectedIcon: Icon(Icons.map),
+              label: '지도',
             ),
             NavigationDestination(
               icon: Icon(Icons.settings_outlined),

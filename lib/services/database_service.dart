@@ -22,7 +22,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -39,6 +39,10 @@ class DatabaseService {
         youtubeVideoId TEXT,
         thumbnailUrl TEXT,
         imagePath TEXT,
+        kakaoLat REAL,
+        kakaoLng REAL,
+        naverX REAL,
+        naverY REAL,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL
       )
@@ -103,6 +107,20 @@ class DatabaseService {
     if (oldVersion < 4) {
       await db.execute(
         'ALTER TABLE processing_history ADD COLUMN memoId INTEGER',
+      );
+    }
+    if (oldVersion < 5) {
+      await db.execute(
+        'ALTER TABLE memos ADD COLUMN kakaoLat REAL',
+      );
+      await db.execute(
+        'ALTER TABLE memos ADD COLUMN kakaoLng REAL',
+      );
+      await db.execute(
+        'ALTER TABLE memos ADD COLUMN naverX REAL',
+      );
+      await db.execute(
+        'ALTER TABLE memos ADD COLUMN naverY REAL',
       );
     }
   }
@@ -170,6 +188,16 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  Future<List<Memo>> getMemosWithCoordinates() async {
+    final db = await database;
+    final maps = await db.query(
+      'memos',
+      where: 'kakaoLat IS NOT NULL AND kakaoLng IS NOT NULL',
+      orderBy: 'createdAt DESC',
+    );
+    return maps.map((map) => Memo.fromMap(map)).toList();
   }
 
   Future<List<Memo>> searchMemos(String query) async {

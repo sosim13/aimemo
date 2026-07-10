@@ -14,6 +14,8 @@ import 'youtube_service.dart';
 import 'tiktok_service.dart';
 import 'web_page_service.dart';
 import 'category_detector.dart';
+import 'geocoding_service.dart';
+import 'naver_coord_service.dart';
 import 'debug_logger.dart';
 
 // Native queue type to ContentType mapping
@@ -641,7 +643,7 @@ class ContentProcessingService {
       _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty ? result.title : videoInfo.title;
-      await _databaseService.insertMemo(Memo(
+      await _insertMemo(Memo(
         title: title,
         content: result.content.isNotEmpty ? result.content : extractedContent,
         category: result.category.isNotEmpty ? result.category : '기타',
@@ -655,7 +657,7 @@ class ContentProcessingService {
       // AI failed — save with raw transcript data
       await _debug.log('CPS: YouTube AI failed ($e), saving fallback');
       _updateProgress(ProcessingStage.saving, '저장 중');
-      await _databaseService.insertMemo(Memo(
+      await _insertMemo(Memo(
         title: videoInfo.title,
         content: extractedContent,
         category: '기타',
@@ -693,7 +695,7 @@ class ContentProcessingService {
       _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty ? result.title : tiktokInfo.title;
-      await _databaseService.insertMemo(Memo(
+      await _insertMemo(Memo(
         title: title,
         content: result.content.isNotEmpty ? result.content : extractedContent,
         category: result.category.isNotEmpty ? result.category : '기타',
@@ -705,7 +707,7 @@ class ContentProcessingService {
     } catch (e) {
       await _debug.log('CPS: TikTok AI failed ($e), saving fallback');
       _updateProgress(ProcessingStage.saving, '저장 중');
-      await _databaseService.insertMemo(Memo(
+      await _insertMemo(Memo(
         title: tiktokInfo.title,
         content: extractedContent,
         category: '기타',
@@ -804,7 +806,7 @@ class ContentProcessingService {
       _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty ? result.title : finalTitle;
-      await _databaseService.insertMemo(Memo(
+      await _insertMemo(Memo(
         title: title,
         content: finalContent,
         category: finalCategory,
@@ -819,7 +821,7 @@ class ContentProcessingService {
       final truncated = extractedContent.length > 500
           ? '${extractedContent.substring(0, 500)}\n\n📌 AI 요약에 실패했습니다.'
           : extractedContent;
-      await _databaseService.insertMemo(Memo(
+      await _insertMemo(Memo(
         title: finalTitle,
         content: truncated,
         category: detected ?? '기타',
@@ -839,7 +841,7 @@ class ContentProcessingService {
 
     if (!await _llmService.isAvailable()) {
       // No AI — save raw
-      await _databaseService.insertMemo(Memo(
+      await _insertMemo(Memo(
         title: item.fallbackTitle ?? '메모',
         content: content,
         category: item.fallbackCategory ?? '기타',
@@ -859,7 +861,7 @@ class ContentProcessingService {
       final title = result.title.isNotEmpty
           ? result.title
           : item.fallbackTitle ?? '제목 없음';
-      await _databaseService.insertMemo(Memo(
+      await _insertMemo(Memo(
         title: title,
         content: result.content.isNotEmpty ? result.content : content,
         category: result.category.isNotEmpty ? result.category : '기타',
@@ -869,7 +871,7 @@ class ContentProcessingService {
     } catch (e) {
       await _debug.log('CPS: Text AI failed ($e), saving raw');
       _updateProgress(ProcessingStage.saving, '저장 중');
-      await _databaseService.insertMemo(Memo(
+      await _insertMemo(Memo(
         title: item.fallbackTitle ?? '메모',
         content: content,
         category: item.fallbackCategory ?? '기타',
@@ -904,7 +906,7 @@ class ContentProcessingService {
           final title = result.title.isNotEmpty
               ? result.title
               : '이미지 메모';
-          await _databaseService.insertMemo(Memo(
+          await _insertMemo(Memo(
             title: title,
             content: result.content.isNotEmpty ? result.content : ocrResult.text!,
             category: result.category.isNotEmpty ? result.category : '기타',
@@ -918,7 +920,7 @@ class ContentProcessingService {
       }
 
       _updateProgress(ProcessingStage.saving, '저장 중');
-      await _databaseService.insertMemo(Memo(
+      await _insertMemo(Memo(
         title: '이미지 메모',
         content: ocrResult.text!,
         category: '기타',
@@ -929,7 +931,7 @@ class ContentProcessingService {
 
     await _debug.log('CPS: No text found in image');
     _updateProgress(ProcessingStage.saving, '저장 중');
-    await _databaseService.insertMemo(Memo(
+    await _insertMemo(Memo(
       title: '이미지 메모',
       content: '📷 이미지가 공유되었습니다.\n\n이 이미지에서 인식된 텍스트가 없습니다.',
       category: '기타',
@@ -939,13 +941,103 @@ class ContentProcessingService {
   }
 
   Future<String> _saveFallback(String url, String category) async {
-    await _databaseService.insertMemo(Memo(
+    final memo = Memo(
       title: url,
       content: 'URL: $url',
       category: category,
       sourceUrl: url,
-    ));
+    );
+    final id = await _databaseService.insertMemo(memo);
+    unawaited(_tryGeocode(memo.copyWith(id: id)));
     return url;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Address geocoding (post-processing after memo save)
+  // ---------------------------------------------------------------------------
+
+  /// Insert a memo into DB and trigger address geocoding.
+  /// Geocoding is awaited so coordinates are guaranteed to be saved
+  /// before the caller continues (important for background isolate).
+  Future<int> _insertMemo(Memo memo) async {
+    final id = await _databaseService.insertMemo(memo);
+    await _tryGeocode(memo.copyWith(id: id));
+    return id;
+  }
+
+  /// Update a memo in DB and trigger address geocoding
+  /// if it doesn't already have coordinates.
+  Future<void> _updateMemo(Memo memo) async {
+    await _databaseService.updateMemo(memo);
+    if (!memo.hasCoordinates) {
+      await _tryGeocode(memo);
+    }
+  }
+
+  /// Regex to detect Korean address patterns in content.
+  /// Matches patterns like "서울특별시 강남구 테헤란로 123" or "경기 성남시 판교역로 235",
+  /// as well as "인천 남동구 백범로 109" style addresses.
+  static final RegExp _addressPattern = RegExp(
+    r'(?:서울|경기|인천|강원|충북|충남|충청|대전|경북|경남|경상|대구|전북|전남|전라|광주|부산|울산|제주|세종)'
+    r'(?:[가-힣0-9\s]*(?:시|군|구)[가-힣0-9\s]*)?'
+    r'(?:[가-힣0-9\s]*(?:동|읍|면)[가-힣0-9\s]*)?'
+    r'(?:[가-힣0-9\s]*(?:로|길|대로))'
+    r'\s*\d+[가-힣\d\-]*',
+  );
+
+  /// Try to extract an address from [content] and geocode it.
+  /// Updates the memo in DB if coordinates are found.
+  Future<void> _tryGeocode(Memo memo) async {
+    // Skip if already has coordinates
+    if (memo.hasCoordinates) {
+      await _debug.log('Geocode: memo id=${memo.id} already has coordinates, skipping');
+      return;
+    }
+
+    // Build search text from both title and content
+    final searchText = '${memo.title}\n${memo.content}';
+
+    // Find first address match
+    final match = _addressPattern.firstMatch(searchText);
+    if (match == null) {
+      await _debug.log('Geocode: No address pattern found in memo id=${memo.id}');
+      return;
+    }
+
+    final address = match.group(0)!.trim();
+    await _debug.log('Geocode: Found address candidate in memo id=${memo.id}: "$address"');
+
+    // Call Kakao geocoding
+    final geoResult = await GeocodingService().searchAddress(address);
+    if (geoResult == null) {
+      await _debug.log('Geocode: Kakao geocoding returned no result for "$address"');
+      return;
+    }
+
+    // Call Naver coordinate conversion (optional, best-effort)
+    NaverCoordResult? naverResult;
+    try {
+      naverResult = await NaverCoordService().wgs84ToUtmk(
+        geoResult.lat,
+        geoResult.lng,
+      );
+    } catch (e) {
+      await _debug.log('Geocode: Naver coordinate conversion failed: $e');
+    }
+
+    // Update memo in DB with coordinates
+    final updatedMemo = memo.copyWith(
+      kakaoLat: geoResult.lat,
+      kakaoLng: geoResult.lng,
+      naverX: naverResult?.x ?? geoResult.lat,
+      naverY: naverResult?.y ?? geoResult.lng,
+      updatedAt: DateTime.now(),
+    );
+    await _databaseService.updateMemo(updatedMemo);
+    await _debug.log(
+      'Geocode: Updated memo id=${memo.id} with coord '
+      '(${geoResult.lat}, ${geoResult.lng})',
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -1129,7 +1221,7 @@ class ContentProcessingService {
       thumbnailUrl: videoInfo.thumbnailUrl,
       updatedAt: DateTime.now(),
     );
-    await _databaseService.updateMemo(updated);
+    await _updateMemo(updated);
     return updated;
   }
 
@@ -1189,7 +1281,7 @@ class ContentProcessingService {
       category: finalCategory,
       updatedAt: DateTime.now(),
     );
-    await _databaseService.updateMemo(updated);
+    await _updateMemo(updated);
     return updated;
   }
 
@@ -1212,7 +1304,7 @@ class ContentProcessingService {
       category: result.category.isNotEmpty ? result.category : memo.category,
       updatedAt: DateTime.now(),
     );
-    await _databaseService.updateMemo(updated);
+    await _updateMemo(updated);
     return updated;
   }
 
@@ -1244,8 +1336,8 @@ class ContentProcessingService {
         category: result.category.isNotEmpty ? result.category : memo.category,
         updatedAt: DateTime.now(),
       );
-      await _databaseService.updateMemo(updated);
-      return updated;
+    await _updateMemo(updated);
+    return updated;
     }
 
     return memo;

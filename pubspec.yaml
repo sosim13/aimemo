@@ -42,6 +42,9 @@ dependencies:
   flutter_gemma: ^1.1.2
   flutter_gemma_litertlm: ^1.0.2
 
+  # Naver Map (for address location display)
+  flutter_naver_map: ^1.4.4
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

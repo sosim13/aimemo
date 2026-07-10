@@ -7,6 +7,15 @@ class Memo {
   final String? youtubeVideoId;
   final String? thumbnailUrl;
   final String? imagePath;
+
+  /// Kakao (WGS84) coordinates from address geocoding
+  final double? kakaoLat;
+  final double? kakaoLng;
+
+  /// Naver (UTMK) coordinates from coordinate conversion
+  final double? naverX;
+  final double? naverY;
+
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -19,6 +28,10 @@ class Memo {
     this.youtubeVideoId,
     this.thumbnailUrl,
     this.imagePath,
+    this.kakaoLat,
+    this.kakaoLng,
+    this.naverX,
+    this.naverY,
     DateTime? createdAt,
     DateTime? updatedAt,
   })  : createdAt = createdAt ?? DateTime.now(),
@@ -44,6 +57,10 @@ class Memo {
       'youtubeVideoId': youtubeVideoId,
       'thumbnailUrl': thumbnailUrl,
       'imagePath': imagePath,
+      'kakaoLat': kakaoLat,
+      'kakaoLng': kakaoLng,
+      'naverX': naverX,
+      'naverY': naverY,
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
     };
@@ -59,6 +76,10 @@ class Memo {
       youtubeVideoId: map['youtubeVideoId'] as String?,
       thumbnailUrl: map['thumbnailUrl'] as String?,
       imagePath: map['imagePath'] as String?,
+      kakaoLat: (map['kakaoLat'] as num?)?.toDouble(),
+      kakaoLng: (map['kakaoLng'] as num?)?.toDouble(),
+      naverX: (map['naverX'] as num?)?.toDouble(),
+      naverY: (map['naverY'] as num?)?.toDouble(),
       createdAt: DateTime.parse(map['createdAt'] as String),
       updatedAt: DateTime.parse(map['updatedAt'] as String),
     );
@@ -73,6 +94,10 @@ class Memo {
     String? youtubeVideoId,
     String? thumbnailUrl,
     String? imagePath,
+    double? kakaoLat,
+    double? kakaoLng,
+    double? naverX,
+    double? naverY,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) {
@@ -85,10 +110,16 @@ class Memo {
       youtubeVideoId: youtubeVideoId ?? this.youtubeVideoId,
       thumbnailUrl: thumbnailUrl ?? this.thumbnailUrl,
       imagePath: imagePath ?? this.imagePath,
+      kakaoLat: kakaoLat ?? this.kakaoLat,
+      kakaoLng: kakaoLng ?? this.kakaoLng,
+      naverX: naverX ?? this.naverX,
+      naverY: naverY ?? this.naverY,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
   }
+
+  bool get hasCoordinates => kakaoLat != null && kakaoLng != null;
 
   Map<String, dynamic> toJson() {
     return {
@@ -100,6 +131,10 @@ class Memo {
       'youtubeVideoId': youtubeVideoId,
       'thumbnailUrl': thumbnailUrl,
       'imagePath': imagePath,
+      'kakaoLat': kakaoLat,
+      'kakaoLng': kakaoLng,
+      'naverX': naverX,
+      'naverY': naverY,
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
     };
@@ -115,6 +150,10 @@ class Memo {
       youtubeVideoId: json['youtubeVideoId'] as String?,
       thumbnailUrl: json['thumbnailUrl'] as String?,
       imagePath: json['imagePath'] as String?,
+      kakaoLat: (json['kakaoLat'] as num?)?.toDouble(),
+      kakaoLng: (json['kakaoLng'] as num?)?.toDouble(),
+      naverX: (json['naverX'] as num?)?.toDouble(),
+      naverY: (json['naverY'] as num?)?.toDouble(),
       createdAt: DateTime.parse(json['createdAt'] as String),
       updatedAt: DateTime.parse(json['updatedAt'] as String),
     );
