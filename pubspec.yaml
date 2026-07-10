@@ -45,6 +45,9 @@ dependencies:
   # Naver Map (for address location display)
   flutter_naver_map: ^1.4.4
 
+  # Geolocation (for current location on map)
+  geolocator: ^13.0.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

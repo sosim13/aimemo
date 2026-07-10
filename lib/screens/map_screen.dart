@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
+import 'package:geolocator/geolocator.dart';
 import '../models/memo.dart';
 import '../services/database_service.dart';
 import '../services/secure_storage_service.dart';
@@ -141,6 +142,29 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  /// Request location permission and enable location tracking on the map.
+  Future<void> _requestLocationAndTrack(NaverMapController controller) async {
+    // Check if location permission is already granted
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('⚠️ 위치 권한이 필요합니다. 설정에서 위치 권한을 허용해주세요.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return;
+    }
+    // Permission granted — enable location tracking
+    controller.setLocationTrackingMode(NLocationTrackingMode.follow);
+  }
+
   void _onMarkerTapped(Memo memo) {
     setState(() {
       _selectedMemo = memo;
@@ -251,6 +275,7 @@ class _MapScreenState extends State<MapScreen> {
           onMapReady: (controller) {
             _mapController = controller;
             _rebuildMarkers();
+            _requestLocationAndTrack(controller);
           },
           onMapTapped: (_, __) {
             if (_selectedMemo != null) {

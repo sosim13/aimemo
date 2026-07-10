@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_naver_map/flutter_naver_map.dart';
+import 'package:geolocator/geolocator.dart';
 import '../models/memo.dart';
 import '../services/database_service.dart';
 
@@ -90,7 +91,7 @@ class _MemoMapScreenState extends State<MemoMapScreen> {
         scaleBarEnable: true,
         locationButtonEnable: true,
       ),
-      onMapReady: (controller) {
+      onMapReady: (controller) async {
         final marker = NMarker(
           id: 'memo_${memo.id}',
           position: NLatLng(memo.kakaoLat!, memo.kakaoLng!),
@@ -101,6 +102,16 @@ class _MemoMapScreenState extends State<MemoMapScreen> {
           ),
         );
         controller.addOverlay(marker);
+
+        // Request location permission and enable tracking
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+        }
+        if (permission != LocationPermission.denied &&
+            permission != LocationPermission.deniedForever) {
+          controller.setLocationTrackingMode(NLocationTrackingMode.follow);
+        }
       },
     );
   }
