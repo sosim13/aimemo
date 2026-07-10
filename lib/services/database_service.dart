@@ -22,7 +22,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 5,
+      version: 6,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -39,6 +39,7 @@ class DatabaseService {
         youtubeVideoId TEXT,
         thumbnailUrl TEXT,
         imagePath TEXT,
+        address TEXT,
         kakaoLat REAL,
         kakaoLng REAL,
         naverX REAL,
@@ -121,6 +122,11 @@ class DatabaseService {
       );
       await db.execute(
         'ALTER TABLE memos ADD COLUMN naverY REAL',
+      );
+    }
+    if (oldVersion < 6) {
+      await db.execute(
+        'ALTER TABLE memos ADD COLUMN address TEXT',
       );
     }
   }

@@ -14,6 +14,7 @@ import 'screens/settings_screen.dart';
 import 'screens/map_screen.dart';
 import 'screens/memo_input_screen.dart';
 import 'screens/memo_detail_screen.dart';
+import 'screens/memo_map_screen.dart';
 import 'screens/url_processing_screen.dart';
 import 'screens/chat_screen.dart';
 
@@ -295,6 +296,13 @@ class AimemoApp extends StatelessWidget {
             final args = settings.arguments as Map<String, dynamic>;
             return MaterialPageRoute(
               builder: (_) => MemoDetailScreen(
+                memoId: args['memoId'] as int,
+              ),
+            );
+          case '/memo-map':
+            final args = settings.arguments as Map<String, dynamic>;
+            return MaterialPageRoute(
+              builder: (_) => MemoMapScreen(
                 memoId: args['memoId'] as int,
               ),
             );

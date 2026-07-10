@@ -63,6 +63,11 @@ class MemoCard extends StatelessWidget {
                         const SizedBox(width: 4),
                         Icon(Icons.image, size: 16, color: Colors.grey[400]),
                       ],
+                      if (memo.hasCoordinates) ...[
+                        const SizedBox(width: 4),
+                        Icon(Icons.location_on,
+                            size: 16, color: Colors.red[300]),
+                      ],
                       if (onDelete != null)
                         IconButton(
                           icon: Icon(Icons.delete_outline,

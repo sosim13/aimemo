@@ -109,6 +109,11 @@ class AiAnalysisResult {
   final String category;
   final String content;
   final List<String> keywords;
+
+  /// Extracted address from AI analysis (e.g. "인천 남동구 백범로 109").
+  /// Empty string means the AI didn't find an address.
+  final String address;
+
   final String? sourceUrl;
   final String? youtubeVideoId;
 
@@ -117,6 +122,7 @@ class AiAnalysisResult {
     required this.category,
     required this.content,
     required this.keywords,
+    this.address = '',
     this.sourceUrl,
     this.youtubeVideoId,
   });
@@ -129,6 +135,7 @@ class AiAnalysisResult {
     String category = '기타';
     String content = text;
     List<String> keywords = [];
+    String address = '';
 
     // PRIMARY: Use keyword-based detection on the original content (most reliable)
     // AI models often fail to follow structured output format for categories,
@@ -178,6 +185,21 @@ class AiAnalysisResult {
       if (keywords.length > 10) keywords = keywords.take(10).toList();
     }
 
+    // Parse ## 주소 section
+    final addrMatch = RegExp(r'##\s*주소\s*\n(.+?)(?:\n##|\n$|$)',
+            caseSensitive: false, dotAll: true)
+        .firstMatch(text);
+    if (addrMatch != null) {
+      final raw = addrMatch.group(1)!.trim();
+      // Only set if it's not a "없음" / "없습니다" / empty response
+      if (raw.isNotEmpty &&
+          !raw.contains('없음') &&
+          !raw.contains('없습니다') &&
+          !raw.contains('정보가 부족')) {
+        address = raw;
+      }
+    }
+
     final contentMatch = RegExp(r'##\s*내용\s*\n(.+?)$',
             caseSensitive: false, dotAll: true)
         .firstMatch(text);
@@ -195,6 +217,7 @@ class AiAnalysisResult {
       category: category.isNotEmpty ? category : '기타',
       content: content.isNotEmpty ? content : text,
       keywords: keywords,
+      address: address,
       sourceUrl: sourceUrl,
       youtubeVideoId: youtubeVideoId,
     );

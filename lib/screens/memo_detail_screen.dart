@@ -9,6 +9,7 @@ import '../services/content_processing_service.dart';
 import '../services/llm_service.dart';
 import '../widgets/category_chip.dart';
 import '../services/category_detector.dart';
+import 'memo_map_screen.dart';
 
 class MemoDetailScreen extends StatefulWidget {
   final int memoId;
@@ -452,6 +453,95 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
                               color: Colors.blue[400], size: 18),
                         ),
                       ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+
+            // Address (from AI analysis) — tappable → opens map
+            if (memo.hasAddress && memo.hasCoordinates && !_isEditing) ...[
+              Card(
+                color: Colors.green[50],
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => MemoMapScreen(memoId: memo.id!),
+                      ),
+                    );
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Row(
+                      children: [
+                        Icon(Icons.location_on,
+                            color: Colors.green[700], size: 20),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                memo.address!,
+                                style: TextStyle(
+                                  color: Colors.green[800],
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  decoration: TextDecoration.underline,
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                '지도에서 보기',
+                                style: TextStyle(
+                                  color: Colors.green[500],
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Icon(Icons.chevron_right,
+                            color: Colors.green[400], size: 20),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ] else if (memo.hasAddress && !memo.hasCoordinates && !_isEditing) ...[
+              Card(
+                color: Colors.grey[50],
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      Icon(Icons.location_on_outlined,
+                          color: Colors.grey[500], size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          memo.address!,
+                          style: TextStyle(
+                            color: Colors.grey[600],
+                            fontSize: 14,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      Icon(Icons.hourglass_empty,
+                          color: Colors.grey[400], size: 16),
                     ],
                   ),
                 ),

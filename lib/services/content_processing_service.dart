@@ -647,6 +647,7 @@ class ContentProcessingService {
         title: title,
         content: result.content.isNotEmpty ? result.content : extractedContent,
         category: result.category.isNotEmpty ? result.category : '기타',
+        address: result.address.isNotEmpty ? result.address : null,
         sourceUrl: url,
         youtubeVideoId: videoId,
         thumbnailUrl: videoInfo.thumbnailUrl,
@@ -699,6 +700,7 @@ class ContentProcessingService {
         title: title,
         content: result.content.isNotEmpty ? result.content : extractedContent,
         category: result.category.isNotEmpty ? result.category : '기타',
+        address: result.address.isNotEmpty ? result.address : null,
         sourceUrl: url,
         thumbnailUrl: tiktokInfo.thumbnailUrl,
       ));
@@ -810,6 +812,7 @@ class ContentProcessingService {
         title: title,
         content: finalContent,
         category: finalCategory,
+        address: result.address.isNotEmpty ? result.address : null,
         sourceUrl: url,
       ));
       await _debug.log('CPS: Web memo saved');
@@ -865,6 +868,7 @@ class ContentProcessingService {
         title: title,
         content: result.content.isNotEmpty ? result.content : content,
         category: result.category.isNotEmpty ? result.category : '기타',
+        address: result.address.isNotEmpty ? result.address : null,
       ));
       await _debug.log('CPS: Text memo saved via AI');
       return title;
@@ -910,6 +914,7 @@ class ContentProcessingService {
             title: title,
             content: result.content.isNotEmpty ? result.content : ocrResult.text!,
             category: result.category.isNotEmpty ? result.category : '기타',
+            address: result.address.isNotEmpty ? result.address : null,
             imagePath: localImagePath,
           ));
           await _debug.log('CPS: Image OCR memo saved via AI');
@@ -948,7 +953,7 @@ class ContentProcessingService {
       sourceUrl: url,
     );
     final id = await _databaseService.insertMemo(memo);
-    unawaited(_tryGeocode(memo.copyWith(id: id)));
+    await _tryGeocode(memo.copyWith(id: id));
     return url;
   }
 
@@ -986,6 +991,8 @@ class ContentProcessingService {
   );
 
   /// Try to extract an address from [content] and geocode it.
+  /// Uses the stored [address] field first (from AI analysis), then falls back
+  /// to regex pattern matching on title+content.
   /// Updates the memo in DB if coordinates are found.
   Future<void> _tryGeocode(Memo memo) async {
     // Skip if already has coordinates
@@ -994,18 +1001,22 @@ class ContentProcessingService {
       return;
     }
 
-    // Build search text from both title and content
-    final searchText = '${memo.title}\n${memo.content}';
-
-    // Find first address match
-    final match = _addressPattern.firstMatch(searchText);
-    if (match == null) {
-      await _debug.log('Geocode: No address pattern found in memo id=${memo.id}');
-      return;
+    // PRIORITY 1: Use the stored address from AI analysis (most reliable)
+    String address;
+    if (memo.hasAddress) {
+      address = memo.address!;
+      await _debug.log('Geocode: Using stored address from AI for memo id=${memo.id}: "$address"');
+    } else {
+      // PRIORITY 2: Fall back to regex pattern matching on title+content
+      final searchText = '${memo.title}\n${memo.content}';
+      final match = _addressPattern.firstMatch(searchText);
+      if (match == null) {
+        await _debug.log('Geocode: No address pattern found in memo id=${memo.id}');
+        return;
+      }
+      address = match.group(0)!.trim();
+      await _debug.log('Geocode: Found address via regex in memo id=${memo.id}: "$address"');
     }
-
-    final address = match.group(0)!.trim();
-    await _debug.log('Geocode: Found address candidate in memo id=${memo.id}: "$address"');
 
     // Call Kakao geocoding
     final geoResult = await GeocodingService().searchAddress(address);
@@ -1218,6 +1229,7 @@ class ContentProcessingService {
       title: title,
       content: result.content.isNotEmpty ? result.content : extractedContent,
       category: result.category.isNotEmpty ? result.category : '기타',
+      address: result.address.isNotEmpty ? result.address : memo.address,
       thumbnailUrl: videoInfo.thumbnailUrl,
       updatedAt: DateTime.now(),
     );
@@ -1279,6 +1291,7 @@ class ContentProcessingService {
       title: title,
       content: finalContent,
       category: finalCategory,
+      address: result.address.isNotEmpty ? result.address : memo.address,
       updatedAt: DateTime.now(),
     );
     await _updateMemo(updated);
@@ -1302,6 +1315,7 @@ class ContentProcessingService {
       title: title,
       content: result.content.isNotEmpty ? result.content : content,
       category: result.category.isNotEmpty ? result.category : memo.category,
+      address: result.address.isNotEmpty ? result.address : memo.address,
       updatedAt: DateTime.now(),
     );
     await _updateMemo(updated);
@@ -1334,6 +1348,7 @@ class ContentProcessingService {
         title: title,
         content: result.content.isNotEmpty ? result.content : ocrResult.text!,
         category: result.category.isNotEmpty ? result.category : memo.category,
+        address: result.address.isNotEmpty ? result.address : memo.address,
         updatedAt: DateTime.now(),
       );
     await _updateMemo(updated);

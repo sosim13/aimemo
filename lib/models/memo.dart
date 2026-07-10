@@ -8,6 +8,9 @@ class Memo {
   final String? thumbnailUrl;
   final String? imagePath;
 
+  /// Extracted address from AI analysis (e.g. "인천 남동구 백범로 109")
+  final String? address;
+
   /// Kakao (WGS84) coordinates from address geocoding
   final double? kakaoLat;
   final double? kakaoLng;
@@ -28,6 +31,7 @@ class Memo {
     this.youtubeVideoId,
     this.thumbnailUrl,
     this.imagePath,
+    this.address,
     this.kakaoLat,
     this.kakaoLng,
     this.naverX,
@@ -47,6 +51,12 @@ class Memo {
   /// Whether this memo is associated with any media (video or image)
   bool get hasMedia => hasThumbnail || hasImage;
 
+  /// Whether this memo has geocoded coordinates
+  bool get hasCoordinates => kakaoLat != null && kakaoLng != null;
+
+  /// Whether this memo has an extracted address from AI analysis
+  bool get hasAddress => address != null && address!.isNotEmpty && address != '없음';
+
   Map<String, dynamic> toMap() {
     return {
       if (id != null) 'id': id,
@@ -57,6 +67,7 @@ class Memo {
       'youtubeVideoId': youtubeVideoId,
       'thumbnailUrl': thumbnailUrl,
       'imagePath': imagePath,
+      'address': address,
       'kakaoLat': kakaoLat,
       'kakaoLng': kakaoLng,
       'naverX': naverX,
@@ -76,6 +87,7 @@ class Memo {
       youtubeVideoId: map['youtubeVideoId'] as String?,
       thumbnailUrl: map['thumbnailUrl'] as String?,
       imagePath: map['imagePath'] as String?,
+      address: map['address'] as String?,
       kakaoLat: (map['kakaoLat'] as num?)?.toDouble(),
       kakaoLng: (map['kakaoLng'] as num?)?.toDouble(),
       naverX: (map['naverX'] as num?)?.toDouble(),
@@ -94,6 +106,7 @@ class Memo {
     String? youtubeVideoId,
     String? thumbnailUrl,
     String? imagePath,
+    String? address,
     double? kakaoLat,
     double? kakaoLng,
     double? naverX,
@@ -110,6 +123,7 @@ class Memo {
       youtubeVideoId: youtubeVideoId ?? this.youtubeVideoId,
       thumbnailUrl: thumbnailUrl ?? this.thumbnailUrl,
       imagePath: imagePath ?? this.imagePath,
+      address: address ?? this.address,
       kakaoLat: kakaoLat ?? this.kakaoLat,
       kakaoLng: kakaoLng ?? this.kakaoLng,
       naverX: naverX ?? this.naverX,
@@ -118,8 +132,6 @@ class Memo {
       updatedAt: updatedAt ?? this.updatedAt,
     );
   }
-
-  bool get hasCoordinates => kakaoLat != null && kakaoLng != null;
 
   Map<String, dynamic> toJson() {
     return {
@@ -131,6 +143,7 @@ class Memo {
       'youtubeVideoId': youtubeVideoId,
       'thumbnailUrl': thumbnailUrl,
       'imagePath': imagePath,
+      'address': address,
       'kakaoLat': kakaoLat,
       'kakaoLng': kakaoLng,
       'naverX': naverX,
@@ -150,6 +163,7 @@ class Memo {
       youtubeVideoId: json['youtubeVideoId'] as String?,
       thumbnailUrl: json['thumbnailUrl'] as String?,
       imagePath: json['imagePath'] as String?,
+      address: json['address'] as String?,
       kakaoLat: (json['kakaoLat'] as num?)?.toDouble(),
       kakaoLng: (json['kakaoLng'] as num?)?.toDouble(),
       naverX: (json['naverX'] as num?)?.toDouble(),
