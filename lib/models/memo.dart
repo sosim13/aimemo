@@ -11,6 +11,10 @@ class Memo {
   /// Extracted address from AI analysis (e.g. "인천 남동구 백범로 109")
   final String? address;
 
+  /// Search keyword for map lookup when no address found
+  /// (e.g. "신림 맛집", "강남역 카페")
+  final String? searchKeyword;
+
   /// Kakao (WGS84) coordinates from address geocoding
   final double? kakaoLat;
   final double? kakaoLng;
@@ -32,6 +36,7 @@ class Memo {
     this.thumbnailUrl,
     this.imagePath,
     this.address,
+    this.searchKeyword,
     this.kakaoLat,
     this.kakaoLng,
     this.naverX,
@@ -57,6 +62,9 @@ class Memo {
   /// Whether this memo has an extracted address from AI analysis
   bool get hasAddress => address != null && address!.isNotEmpty && address != '없음';
 
+  /// Whether this memo has a search keyword for map lookup
+  bool get hasSearchKeyword => searchKeyword != null && searchKeyword!.isNotEmpty;
+
   Map<String, dynamic> toMap() {
     return {
       if (id != null) 'id': id,
@@ -68,6 +76,7 @@ class Memo {
       'thumbnailUrl': thumbnailUrl,
       'imagePath': imagePath,
       'address': address,
+      'searchKeyword': searchKeyword,
       'kakaoLat': kakaoLat,
       'kakaoLng': kakaoLng,
       'naverX': naverX,
@@ -88,6 +97,7 @@ class Memo {
       thumbnailUrl: map['thumbnailUrl'] as String?,
       imagePath: map['imagePath'] as String?,
       address: map['address'] as String?,
+      searchKeyword: map['searchKeyword'] as String?,
       kakaoLat: (map['kakaoLat'] as num?)?.toDouble(),
       kakaoLng: (map['kakaoLng'] as num?)?.toDouble(),
       naverX: (map['naverX'] as num?)?.toDouble(),
@@ -107,6 +117,7 @@ class Memo {
     String? thumbnailUrl,
     String? imagePath,
     String? address,
+    String? searchKeyword,
     double? kakaoLat,
     double? kakaoLng,
     double? naverX,
@@ -124,6 +135,7 @@ class Memo {
       thumbnailUrl: thumbnailUrl ?? this.thumbnailUrl,
       imagePath: imagePath ?? this.imagePath,
       address: address ?? this.address,
+      searchKeyword: searchKeyword ?? this.searchKeyword,
       kakaoLat: kakaoLat ?? this.kakaoLat,
       kakaoLng: kakaoLng ?? this.kakaoLng,
       naverX: naverX ?? this.naverX,
@@ -144,6 +156,7 @@ class Memo {
       'thumbnailUrl': thumbnailUrl,
       'imagePath': imagePath,
       'address': address,
+      'searchKeyword': searchKeyword,
       'kakaoLat': kakaoLat,
       'kakaoLng': kakaoLng,
       'naverX': naverX,
@@ -164,6 +177,7 @@ class Memo {
       thumbnailUrl: json['thumbnailUrl'] as String?,
       imagePath: json['imagePath'] as String?,
       address: json['address'] as String?,
+      searchKeyword: json['searchKeyword'] as String?,
       kakaoLat: (json['kakaoLat'] as num?)?.toDouble(),
       kakaoLng: (json['kakaoLng'] as num?)?.toDouble(),
       naverX: (json['naverX'] as num?)?.toDouble(),

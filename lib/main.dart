@@ -161,7 +161,7 @@ Future<void> backgroundMain() async {
 }
 
 /// Main shell with bottom navigation bar.
-/// Three tabs: 메모 (Home), 처리현황 (Queue), 설정 (Settings)
+/// Five tabs: 메모 (Home), 처리현황 (Queue), AI 검색 (Chat), 지도 (Map), 설정 (Settings)
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
 
@@ -190,6 +190,7 @@ class _MainShellState extends State<MainShell> {
         children: const [
           HomeScreen(),
           QueueScreen(),
+          ChatScreen(),
           MapScreen(),
           SettingsScreen(),
         ],
@@ -211,6 +212,11 @@ class _MainShellState extends State<MainShell> {
               icon: Icon(Icons.hourglass_bottom_outlined),
               selectedIcon: Icon(Icons.hourglass_bottom),
               label: '처리현황',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.smart_toy_outlined),
+              selectedIcon: Icon(Icons.smart_toy),
+              label: 'AI 검색',
             ),
             NavigationDestination(
               icon: Icon(Icons.map_outlined),

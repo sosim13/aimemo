@@ -1,6 +1,7 @@
 import '../models/memo.dart';
 import '../models/chat_message.dart';
 import 'category_detector.dart';
+import 'content_processing_service.dart';
 import 'database_service.dart';
 import 'llm_service.dart';
 
@@ -56,7 +57,7 @@ class ChatService {
     '하는', '있는', '그거', '이거', '저거',
     '어떻게', '뭔지', '무엇', '어디', '뭐가',
     '있을까', '할까', '될까', '주라',
-    '좀', '밖에', '대해', '관련', '통해',
+    '좀', '밖에', '대해', '관련', '통해', '근처',
     '싶어', '궁금', '줘',
     'please', 'help', 'find', 'show', 'tell',
     'search', 'look', 'need', 'want',
@@ -161,6 +162,7 @@ class ChatService {
       title: title,
       content: rawContent,
       category: category,
+      searchKeyword: ContentProcessingService.extractSearchKeyword(rawContent),
     );
     final id = await _databaseService.insertMemo(memo);
     final savedMemo = memo.copyWith(id: id);
@@ -238,20 +240,28 @@ class ChatService {
 
     double scoreMemo(Memo memo) {
       double score = 0;
+      int kwMatches = 0;
       final lowerTitle = memo.title.toLowerCase();
       final lowerContent = memo.content.toLowerCase();
       for (final kw in meaningfulKeywords) {
         final lowerKw = kw.toLowerCase();
         if (lowerTitle.contains(lowerKw)) {
           score += 2.0;
+          kwMatches++;
         } else if (lowerContent.contains(lowerKw)) {
           score += 1.0;
+          kwMatches++;
         } else if (memo.category.contains(kw)) {
           score += 0.5;
+          kwMatches++;
         }
       }
       if (lowerTitle.contains(query.toLowerCase())) {
         score += 1.0;
+      }
+      // Penalize memos that match only one keyword when the query has 2+
+      if (meaningfulKeywords.length >= 2 && kwMatches < 2) {
+        score *= 0.5;
       }
       return score;
     }

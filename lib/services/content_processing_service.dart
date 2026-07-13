@@ -643,11 +643,15 @@ class ContentProcessingService {
       _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty ? result.title : videoInfo.title;
+      final searchKeyword = result.address.isEmpty
+          ? extractSearchKeyword(result.content.isNotEmpty ? result.content : extractedContent)
+          : null;
       await _insertMemo(Memo(
         title: title,
         content: result.content.isNotEmpty ? result.content : extractedContent,
         category: result.category.isNotEmpty ? result.category : '기타',
         address: result.address.isNotEmpty ? result.address : null,
+        searchKeyword: searchKeyword,
         sourceUrl: url,
         youtubeVideoId: videoId,
         thumbnailUrl: videoInfo.thumbnailUrl,
@@ -658,10 +662,12 @@ class ContentProcessingService {
       // AI failed — save with raw transcript data
       await _debug.log('CPS: YouTube AI failed ($e), saving fallback');
       _updateProgress(ProcessingStage.saving, '저장 중');
+      final fallbackKeyword = extractSearchKeyword(extractedContent);
       await _insertMemo(Memo(
         title: videoInfo.title,
         content: extractedContent,
         category: '기타',
+        searchKeyword: fallbackKeyword,
         sourceUrl: url,
         youtubeVideoId: videoId,
         thumbnailUrl: videoInfo.thumbnailUrl,
@@ -696,11 +702,15 @@ class ContentProcessingService {
       _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty ? result.title : tiktokInfo.title;
+      final searchKeyword = result.address.isEmpty
+          ? extractSearchKeyword(result.content.isNotEmpty ? result.content : extractedContent)
+          : null;
       await _insertMemo(Memo(
         title: title,
         content: result.content.isNotEmpty ? result.content : extractedContent,
         category: result.category.isNotEmpty ? result.category : '기타',
         address: result.address.isNotEmpty ? result.address : null,
+        searchKeyword: searchKeyword,
         sourceUrl: url,
         thumbnailUrl: tiktokInfo.thumbnailUrl,
       ));
@@ -709,10 +719,30 @@ class ContentProcessingService {
     } catch (e) {
       await _debug.log('CPS: TikTok AI failed ($e), saving fallback');
       _updateProgress(ProcessingStage.saving, '저장 중');
+
+      // Try to extract address from TikTok description as fallback
+      String? fallbackAddress;
+      final addressMatch = _roadAddressPattern.firstMatch(extractedContent);
+      if (addressMatch != null) {
+        fallbackAddress = addressMatch.group(0)!.trim();
+      }
+      if (fallbackAddress == null) {
+        final landMatch = _landAddressPattern.firstMatch(extractedContent);
+        if (landMatch != null) {
+          fallbackAddress = landMatch.group(0)!.trim();
+        }
+      }
+
+      final fallbackKeyword = fallbackAddress == null
+          ? extractSearchKeyword(extractedContent)
+          : null;
+
       await _insertMemo(Memo(
         title: tiktokInfo.title,
         content: extractedContent,
         category: '기타',
+        address: fallbackAddress,
+        searchKeyword: fallbackKeyword,
         sourceUrl: url,
         thumbnailUrl: tiktokInfo.thumbnailUrl,
       ));
@@ -808,11 +838,15 @@ class ContentProcessingService {
       _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty ? result.title : finalTitle;
+      final searchKeyword = result.address.isEmpty
+          ? extractSearchKeyword(result.content.isNotEmpty ? result.content : extractedContent)
+          : null;
       await _insertMemo(Memo(
         title: title,
         content: finalContent,
         category: finalCategory,
         address: result.address.isNotEmpty ? result.address : null,
+        searchKeyword: searchKeyword,
         sourceUrl: url,
       ));
       await _debug.log('CPS: Web memo saved');
@@ -824,10 +858,12 @@ class ContentProcessingService {
       final truncated = extractedContent.length > 500
           ? '${extractedContent.substring(0, 500)}\n\n📌 AI 요약에 실패했습니다.'
           : extractedContent;
+      final fallbackKeyword = extractSearchKeyword(extractedContent);
       await _insertMemo(Memo(
         title: finalTitle,
         content: truncated,
         category: detected ?? '기타',
+        searchKeyword: fallbackKeyword,
         sourceUrl: url,
       ));
       return finalTitle;
@@ -844,10 +880,12 @@ class ContentProcessingService {
 
     if (!await _llmService.isAvailable()) {
       // No AI — save raw
+      final fallbackKeyword = extractSearchKeyword(content);
       await _insertMemo(Memo(
         title: item.fallbackTitle ?? '메모',
         content: content,
         category: item.fallbackCategory ?? '기타',
+        searchKeyword: fallbackKeyword,
       ));
       return item.fallbackTitle ?? '메모';
     }
@@ -864,21 +902,27 @@ class ContentProcessingService {
       final title = result.title.isNotEmpty
           ? result.title
           : item.fallbackTitle ?? '제목 없음';
+      final searchKeyword = result.address.isEmpty
+          ? extractSearchKeyword(result.content.isNotEmpty ? result.content : content)
+          : null;
       await _insertMemo(Memo(
         title: title,
         content: result.content.isNotEmpty ? result.content : content,
         category: result.category.isNotEmpty ? result.category : '기타',
         address: result.address.isNotEmpty ? result.address : null,
+        searchKeyword: searchKeyword,
       ));
       await _debug.log('CPS: Text memo saved via AI');
       return title;
     } catch (e) {
       await _debug.log('CPS: Text AI failed ($e), saving raw');
       _updateProgress(ProcessingStage.saving, '저장 중');
+      final fallbackKeyword = extractSearchKeyword(content);
       await _insertMemo(Memo(
         title: item.fallbackTitle ?? '메모',
         content: content,
         category: item.fallbackCategory ?? '기타',
+        searchKeyword: fallbackKeyword,
       ));
       return item.fallbackTitle ?? '메모';
     }
@@ -910,11 +954,15 @@ class ContentProcessingService {
           final title = result.title.isNotEmpty
               ? result.title
               : '이미지 메모';
+          final searchKeyword = result.address.isEmpty
+              ? extractSearchKeyword(result.content.isNotEmpty ? result.content : ocrResult.text!)
+              : null;
           await _insertMemo(Memo(
             title: title,
             content: result.content.isNotEmpty ? result.content : ocrResult.text!,
             category: result.category.isNotEmpty ? result.category : '기타',
             address: result.address.isNotEmpty ? result.address : null,
+            searchKeyword: searchKeyword,
             imagePath: localImagePath,
           ));
           await _debug.log('CPS: Image OCR memo saved via AI');
@@ -925,10 +973,12 @@ class ContentProcessingService {
       }
 
       _updateProgress(ProcessingStage.saving, '저장 중');
+      final ocrFallbackKeyword = extractSearchKeyword(ocrResult.text!);
       await _insertMemo(Memo(
         title: '이미지 메모',
         content: ocrResult.text!,
         category: '기타',
+        searchKeyword: ocrFallbackKeyword,
         imagePath: localImagePath,
       ));
       return '이미지 메모';
@@ -979,20 +1029,51 @@ class ContentProcessingService {
     }
   }
 
-  /// Regex to detect Korean address patterns in content.
-  /// Matches patterns like "서울특별시 강남구 테헤란로 123" or "경기 성남시 판교역로 235",
-  /// as well as "인천 남동구 백범로 109" style addresses.
-  static final RegExp _addressPattern = RegExp(
+  /// Regex to match Korean road address patterns (도로명 주소).
+  /// Examples: "서울특별시 강남구 테헤란로 123", "경기 성남시 판교역로 235-7"
+  static final RegExp _roadAddressPattern = RegExp(
     r'(?:서울|경기|인천|강원|충북|충남|충청|대전|경북|경남|경상|대구|전북|전남|전라|광주|부산|울산|제주|세종)'
-    r'(?:[가-힣0-9\s]*(?:시|군|구)[가-힣0-9\s]*)?'
-    r'(?:[가-힣0-9\s]*(?:동|읍|면)[가-힣0-9\s]*)?'
-    r'(?:[가-힣0-9\s]*(?:로|길|대로))'
+    r'(?:특별시|광역시|도)?\s*'
+    r'(?:[가-힣0-9]*(?:시|군|구)\s*)?'
+    r'(?:[가-힣0-9]*(?:동|읍|면)\s*)?'
+    r'(?:[가-힣0-9]*(?:로|길|대로))'
     r'\s*\d+[가-힣\d\-]*',
   );
 
+  /// Regex to match Korean lot number address patterns (지번 주소).
+  /// Examples: "서울 강남구 역삼동 123-4", "경기도 성남시 분당구 정자동 45"
+  static final RegExp _landAddressPattern = RegExp(
+    r'(?:서울|경기|인천|강원|충북|충남|충청|대전|경북|경남|경상|대구|전북|전남|전라|광주|부산|울산|제주|세종)'
+    r'(?:특별시|광역시|도)?\s*'
+    r'(?:[가-힣0-9]*(?:시|군|구)\s*)'
+    r'(?:[가-힣0-9]*(?:동|읍|면)\s*)'
+    r'\d+[가-힣\d\-]*',
+  );
+
+  /// Regex to extract [region + business type] search keywords from content.
+  /// Used as fallback when no address is found.
+  /// Examples: "신림 맛집", "강남역 카페", "판교 돈까스"
+  static final RegExp searchKeywordPattern = RegExp(
+    r'([가-힣]{2,}(?:역|입구|사거리|오거리)?)\s*'
+    r'(맛집|카페|식당|음식점|술집|호프|주점|바|펍|찻집|제과점|빵집|분식|치킨|피자|국수|냉면|돈까스|초밥|구이|찜|탕|찌개|볶음|전|족발|닭발|파스타|샐러드|버거|샌드위치|떡볶이|순대|만두|고기|해산물|회|포장마차|포차|맛집)'
+  );
+
+  /// Extract a map search keyword ("[region] [business type]") when no address
+  /// can be found in the content.
+  static String? extractSearchKeyword(String content) {
+    final match = searchKeywordPattern.firstMatch(content);
+    if (match != null) {
+      final region = match.group(1)!.trim();
+      final business = match.group(2)!.trim();
+      return '$region $business';
+    }
+    return null;
+  }
+
   /// Try to extract an address from [content] and geocode it.
   /// Uses the stored [address] field first (from AI analysis), then falls back
-  /// to regex pattern matching on title+content.
+  /// to regex pattern matching (도로명 주소 → 지번 주소), then falls back
+  /// to search keyword → Kakao keyword search.
   /// Updates the memo in DB if coordinates are found.
   Future<void> _tryGeocode(Memo memo) async {
     // Skip if already has coordinates
@@ -1001,27 +1082,46 @@ class ContentProcessingService {
       return;
     }
 
+    GeocodingResult? geoResult;
+
     // PRIORITY 1: Use the stored address from AI analysis (most reliable)
-    String address;
     if (memo.hasAddress) {
-      address = memo.address!;
-      await _debug.log('Geocode: Using stored address from AI for memo id=${memo.id}: "$address"');
-    } else {
-      // PRIORITY 2: Fall back to regex pattern matching on title+content
-      final searchText = '${memo.title}\n${memo.content}';
-      final match = _addressPattern.firstMatch(searchText);
-      if (match == null) {
-        await _debug.log('Geocode: No address pattern found in memo id=${memo.id}');
-        return;
-      }
-      address = match.group(0)!.trim();
-      await _debug.log('Geocode: Found address via regex in memo id=${memo.id}: "$address"');
+      await _debug.log('Geocode: Using stored address from AI for memo id=${memo.id}: "${memo.address}"');
+      geoResult = await GeocodingService().searchAddress(memo.address!);
     }
 
-    // Call Kakao geocoding
-    final geoResult = await GeocodingService().searchAddress(address);
+    // PRIORITY 2: Fall back to regex pattern matching on title+content
     if (geoResult == null) {
-      await _debug.log('Geocode: Kakao geocoding returned no result for "$address"');
+      final searchText = '${memo.title}\n${memo.content}';
+      String? foundAddress;
+
+      // Try 도로명 주소 first
+      final roadMatch = _roadAddressPattern.firstMatch(searchText);
+      if (roadMatch != null) {
+        foundAddress = roadMatch.group(0)!.trim();
+        await _debug.log('Geocode: Found road address via regex in memo id=${memo.id}: "$foundAddress"');
+        geoResult = await GeocodingService().searchAddress(foundAddress);
+      }
+
+      // Try 지번 주소 next
+      if (geoResult == null) {
+        final landMatch = _landAddressPattern.firstMatch(searchText);
+        if (landMatch != null) {
+          foundAddress = landMatch.group(0)!.trim();
+          await _debug.log('Geocode: Found land address via regex in memo id=${memo.id}: "$foundAddress"');
+          geoResult = await GeocodingService().searchAddress(foundAddress);
+        }
+      }
+    }
+
+    // PRIORITY 3: Use search keyword → Kakao keyword search
+    if (geoResult == null && memo.hasSearchKeyword) {
+      await _debug.log('Geocode: Using search keyword for memo id=${memo.id}: "${memo.searchKeyword}"');
+      geoResult = await GeocodingService().searchKeyword(memo.searchKeyword!);
+    }
+
+    if (geoResult == null) {
+      await _debug.log('Geocode: No address or keyword found for memo id=${memo.id}');
       return;
     }
 
@@ -1135,6 +1235,8 @@ class ContentProcessingService {
       Memo? updated;
       if (memo.youtubeVideoId != null && memo.sourceUrl != null) {
         updated = await _retryYouTube(memo, memo.sourceUrl!);
+      } else if (memo.sourceUrl != null && _tiktokService.isTikTokUrl(memo.sourceUrl!)) {
+        updated = await _retryTikTok(memo, memo.sourceUrl!);
       } else if (memo.sourceUrl != null) {
         updated = await _retryUrl(memo, memo.sourceUrl!);
       } else if (memo.imagePath != null) {
@@ -1296,6 +1398,76 @@ class ContentProcessingService {
     );
     await _updateMemo(updated);
     return updated;
+  }
+
+  Future<Memo> _retryTikTok(Memo memo, String url) async {
+    await _debug.log('CPS: Retry TikTok URL: $url');
+
+    // Fetch fresh TikTok data via oEmbed
+    final tiktokInfo = await _tiktokService.getVideoInfo(url);
+    if (tiktokInfo == null) {
+      // Fallback to text retry using existing memo content
+      return _retryText(memo);
+    }
+
+    final extractedContent = tiktokInfo.buildContentForAi();
+
+    // Stage: analyzing — AI analysis
+    _updateRetryProgress(ProcessingStage.analyzing, 'AI 재요약 중',
+        progress: ProcessingStage.analyzing.minProgress);
+
+    try {
+      final result = await _aiService.analyzeContent(
+        content: extractedContent,
+        sourceUrl: url,
+      );
+
+      // Stage: saving — persist to DB
+      _updateRetryProgress(ProcessingStage.saving, '저장 중');
+
+      final title = result.title.isNotEmpty ? result.title : tiktokInfo.title;
+      final updated = memo.copyWith(
+        title: title,
+        content: result.content.isNotEmpty
+            ? result.content
+            : extractedContent,
+        category: result.category.isNotEmpty ? result.category : memo.category,
+        address: result.address.isNotEmpty
+            ? result.address
+            : memo.address,
+        thumbnailUrl: tiktokInfo.thumbnailUrl,
+        updatedAt: DateTime.now(),
+      );
+      await _updateMemo(updated);
+      return updated;
+    } catch (e) {
+      await _debug.log('CPS: TikTok retry AI failed ($e), saving fallback');
+
+      // Try regex-based address extraction from TikTok description as fallback
+      String? fallbackAddress;
+      final addressMatch = _roadAddressPattern.firstMatch(extractedContent);
+      if (addressMatch != null) {
+        fallbackAddress = addressMatch.group(0)!.trim();
+      }
+      if (fallbackAddress == null) {
+        final landMatch = _landAddressPattern.firstMatch(extractedContent);
+        if (landMatch != null) {
+          fallbackAddress = landMatch.group(0)!.trim();
+        }
+      }
+
+      _updateRetryProgress(ProcessingStage.saving, '저장 중');
+      final updated = memo.copyWith(
+        title: tiktokInfo.title,
+        content: extractedContent,
+        category: '기타',
+        address: fallbackAddress ?? memo.address,
+        thumbnailUrl: tiktokInfo.thumbnailUrl,
+        updatedAt: DateTime.now(),
+      );
+      await _updateMemo(updated);
+      return updated;
+    }
   }
 
   Future<Memo> _retryText(Memo memo) async {

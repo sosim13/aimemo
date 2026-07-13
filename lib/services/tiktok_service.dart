@@ -179,21 +179,50 @@ class TikTokService {
           String title = 'TikTok 영상';
           String description = '';
 
-          final ogTitle = RegExp(
-            r"""<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']*)["']""",
+          // Priority 1: Extract full description from __UNIVERSAL_DATA_FOR_VIEW_CONTAINER JSON-LD
+          // This contains the complete video description including addresses/URLs
+          final jsonLdMatch = RegExp(
+            r"""<script\s+id=["']__UNIVERSAL_DATA_FOR_VIEW_CONTAINER["'][^>]*>\s*({.*?})\s*</script>""",
             caseSensitive: false,
+            dotAll: true,
           ).firstMatch(html);
-          if (ogTitle != null) {
-            final t = ogTitle.group(1)!.trim();
-            if (t.isNotEmpty) title = t;
+          if (jsonLdMatch != null) {
+            try {
+              final jsonData = jsonDecode(jsonLdMatch.group(1)!);
+              final videoData = jsonData['__DEFAULT_SCOPE__']?['webapp.video-detail']?['itemInfo']?['itemStruct'];
+              if (videoData != null) {
+                final desc = videoData['desc'] as String?;
+                if (desc != null && desc.isNotEmpty) {
+                  title = desc;
+                  description = desc;
+                }
+              }
+            } catch (_) {
+              // JSON parse failed, fall through to meta tag parsing
+            }
           }
 
-          final ogDesc = RegExp(
-            r"""<meta\s+[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["']""",
-            caseSensitive: false,
-          ).firstMatch(html);
-          if (ogDesc != null) {
-            description = ogDesc.group(1)!.trim();
+          // Priority 2: Fallback to og:title if JSON-LD didn't yield a title
+          if (title == 'TikTok 영상') {
+            final ogTitle = RegExp(
+              r"""<meta\s+[^>]*property=["']og:title["'][^>]*content=["']([^"']*)["']""",
+              caseSensitive: false,
+            ).firstMatch(html);
+            if (ogTitle != null) {
+              final t = ogTitle.group(1)!.trim();
+              if (t.isNotEmpty) title = t;
+            }
+          }
+
+          // Priority 3: Try og:description as last resort for description
+          if (description.isEmpty) {
+            final ogDesc = RegExp(
+              r"""<meta\s+[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["']""",
+              caseSensitive: false,
+            ).firstMatch(html);
+            if (ogDesc != null) {
+              description = ogDesc.group(1)!.trim();
+            }
           }
 
           // Extract author from resolved URL or HTML

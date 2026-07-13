@@ -103,14 +103,14 @@ class _MemoMapScreenState extends State<MemoMapScreen> {
         );
         controller.addOverlay(marker);
 
-        // Request location permission and enable tracking
+        // Show user location dot but keep camera at the memo's coordinates
         LocationPermission permission = await Geolocator.checkPermission();
         if (permission == LocationPermission.denied) {
           permission = await Geolocator.requestPermission();
         }
         if (permission != LocationPermission.denied &&
             permission != LocationPermission.deniedForever) {
-          controller.setLocationTrackingMode(NLocationTrackingMode.follow);
+          controller.setLocationTrackingMode(NLocationTrackingMode.noFollow);
         }
       },
     );

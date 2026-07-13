@@ -9,6 +9,8 @@ import '../services/content_processing_service.dart';
 import '../services/llm_service.dart';
 import '../widgets/category_chip.dart';
 import '../services/category_detector.dart';
+import '../services/geocoding_service.dart';
+import '../services/naver_coord_service.dart';
 import 'memo_map_screen.dart';
 
 class MemoDetailScreen extends StatefulWidget {
@@ -30,6 +32,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
   late TextEditingController _titleController;
   late TextEditingController _contentController;
   late TextEditingController _categoryController;
+  late TextEditingController _addressController;
 
   @override
   void initState() {
@@ -37,6 +40,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     _titleController = TextEditingController();
     _contentController = TextEditingController();
     _categoryController = TextEditingController();
+    _addressController = TextEditingController();
     _loadMemo();
   }
 
@@ -45,6 +49,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     _titleController.dispose();
     _contentController.dispose();
     _categoryController.dispose();
+    _addressController.dispose();
     super.dispose();
   }
 
@@ -58,6 +63,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
           _titleController.text = memo.title;
           _contentController.text = memo.content;
           _categoryController.text = memo.category;
+          _addressController.text = memo.address ?? '';
         }
       });
     }
@@ -68,6 +74,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     _titleController.text = _memo!.title;
     _contentController.text = _memo!.content;
     _categoryController.text = _memo!.category;
+    _addressController.text = _memo!.address ?? '';
     setState(() => _isEditing = true);
   }
 
@@ -76,6 +83,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     final title = _titleController.text.trim();
     final content = _contentController.text.trim();
     final category = _categoryController.text.trim();
+    final address = _addressController.text.trim();
 
     if (title.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -93,22 +101,64 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
       }
     }
 
+    // Clear old coordinates when address changes (they're invalid for the new address)
+    final addressChanged = address != (_memo!.address ?? '');
     final updated = _memo!.copyWith(
       title: title,
       content: content,
       category: finalCategory,
+      address: address.isNotEmpty ? address : null,
+      kakaoLat: addressChanged ? null : _memo!.kakaoLat,
+      kakaoLng: addressChanged ? null : _memo!.kakaoLng,
+      naverX: addressChanged ? null : _memo!.naverX,
+      naverY: addressChanged ? null : _memo!.naverY,
       updatedAt: DateTime.now(),
     );
 
     await _databaseService.updateMemo(updated);
+    var savedMemo = updated;
+
+    // Trigger geocoding if address was provided
+    if (address.isNotEmpty && addressChanged) {
+      try {
+        final geoResult = await GeocodingService().searchAddress(address);
+        if (geoResult != null) {
+          NaverCoordResult? naverResult;
+          try {
+            naverResult = await NaverCoordService().wgs84ToUtmk(
+              geoResult.lat,
+              geoResult.lng,
+            );
+          } catch (_) {}
+
+          final geoUpdated = updated.copyWith(
+            kakaoLat: geoResult.lat,
+            kakaoLng: geoResult.lng,
+            naverX: naverResult?.x ?? geoResult.lat,
+            naverY: naverResult?.y ?? geoResult.lng,
+            updatedAt: DateTime.now(),
+          );
+          await _databaseService.updateMemo(geoUpdated);
+          savedMemo = geoUpdated;
+        }
+      } catch (_) {
+        // Geocoding failed silently — user can still edit the address again
+      }
+    }
 
     if (mounted) {
       setState(() {
-        _memo = updated;
+        _memo = savedMemo;
         _isEditing = false;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('✅ 메모가 수정되었습니다.')),
+        SnackBar(
+          content: Text(
+            addressChanged && address.isNotEmpty
+                ? '✅ 메모가 수정되었습니다. 주소 좌표를 변환했습니다.'
+                : '✅ 메모가 수정되었습니다.',
+          ),
+        ),
       );
     }
   }
@@ -460,8 +510,22 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
               const SizedBox(height: 16),
             ],
 
-            // Address (from AI analysis) — tappable → opens map
-            if (memo.hasAddress && memo.hasCoordinates && !_isEditing) ...[
+            // Address — editing mode
+            if (_isEditing) ...[
+              TextField(
+                controller: _addressController,
+                decoration: const InputDecoration(
+                  labelText: '주소',
+                  hintText: '예: 서울특별시 강남구 테헤란로 123',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.location_on_outlined),
+                ),
+                style: const TextStyle(fontSize: 14),
+                maxLines: 2,
+              ),
+              const SizedBox(height: 16),
+            ] else if (memo.hasAddress && memo.hasCoordinates) ...[
+              // Address (from AI analysis) — tappable → opens map
               Card(
                 color: Colors.green[50],
                 shape: RoundedRectangleBorder(
@@ -517,7 +581,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-            ] else if (memo.hasAddress && !memo.hasCoordinates && !_isEditing) ...[
+            ] else if (memo.hasAddress && !memo.hasCoordinates) ...[
               Card(
                 color: Colors.grey[50],
                 shape: RoundedRectangleBorder(

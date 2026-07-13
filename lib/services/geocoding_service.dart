@@ -78,4 +78,59 @@ class GeocodingService {
       return null;
     }
   }
+
+  /// Search for a place by keyword using Kakao Local Keyword API.
+  /// Returns coordinates of the first result, or null if not found.
+  Future<GeocodingResult?> searchKeyword(String query) async {
+    final apiKey = await _storage.getKakaoRestApiKey();
+    if (apiKey == null || apiKey.isEmpty) {
+      await _debug.log('KeywordSearch: Kakao API key not set');
+      return null;
+    }
+
+    final uri = Uri.parse(
+      'https://dapi.kakao.com/v2/local/search/keyword.json',
+    ).replace(queryParameters: {
+      'query': query,
+      'size': '1',
+    });
+
+    try {
+      final response = await http.get(
+        uri,
+        headers: {
+          'Authorization': 'KakaoAK $apiKey',
+        },
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode != 200) {
+        await _debug.log('KeywordSearch: Kakao API error ${response.statusCode}: ${response.body}');
+        return null;
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final documents = data['documents'] as List<dynamic>?;
+
+      if (documents == null || documents.isEmpty) {
+        await _debug.log('KeywordSearch: No results for "$query"');
+        return null;
+      }
+
+      final first = documents.first as Map<String, dynamic>;
+      final x = double.tryParse(first['x'] as String? ?? '');
+      final y = double.tryParse(first['y'] as String? ?? '');
+      final placeName = first['place_name'] as String? ?? query;
+
+      if (x == null || y == null) {
+        await _debug.log('KeywordSearch: Invalid coordinates for "$query"');
+        return null;
+      }
+
+      await _debug.log('KeywordSearch: "$query" -> ($y, $x) = "$placeName"');
+      return GeocodingResult(lat: y, lng: x, address: placeName);
+    } catch (e) {
+      await _debug.log('KeywordSearch: Request failed for "$query": $e');
+      return null;
+    }
+  }
 }

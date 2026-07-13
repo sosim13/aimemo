@@ -13,6 +13,7 @@ import '../services/llm_service.dart';
 import '../services/database_service.dart';
 import '../services/debug_logger.dart';
 import '../services/category_detector.dart';
+import '../services/content_processing_service.dart';
 import '../models/memo.dart';
 import 'memo_input_screen.dart';
 
@@ -174,6 +175,7 @@ class _UrlProcessingScreenState extends State<UrlProcessingScreen> {
         title: result.title.isNotEmpty ? result.title : videoInfo.title,
         content: result.content.isNotEmpty ? result.content : _extractedContent!,
         category: result.category.isNotEmpty ? result.category : '기타',
+        searchKeyword: result.address.isEmpty ? ContentProcessingService.extractSearchKeyword(result.content.isNotEmpty ? result.content : _extractedContent!) : null,
         sourceUrl: videoInfo.videoUrl,
         youtubeVideoId: parsed.youtubeVideoId,
       );
@@ -187,6 +189,7 @@ class _UrlProcessingScreenState extends State<UrlProcessingScreen> {
         title: videoInfo.title,
         content: _extractedContent!,
         category: '기타',
+        searchKeyword: ContentProcessingService.extractSearchKeyword(_extractedContent!),
         sourceUrl: videoInfo.videoUrl,
         youtubeVideoId: parsed.youtubeVideoId,
       );
@@ -234,16 +237,33 @@ class _UrlProcessingScreenState extends State<UrlProcessingScreen> {
         content:
             result.content.isNotEmpty ? result.content : _extractedContent!,
         category: result.category.isNotEmpty ? result.category : '기타',
+        address: result.address.isNotEmpty ? result.address : null,
+        searchKeyword: result.address.isEmpty ? ContentProcessingService.extractSearchKeyword(result.content.isNotEmpty ? result.content : _extractedContent!) : null,
         sourceUrl: tiktokInfo.videoUrl,
       );
 
       await _databaseService.insertMemo(memo);
     } catch (e) {
       // AI 실패 시 기본 정보라도 저장
+      String? fallbackAddress;
+      if (_extractedContent != null) {
+        final addressMatch = RegExp(
+          r'(?:서울|경기|인천|강원|충북|충남|충청|대전|경북|경남|경상|대구|전북|전남|전라|광주|부산|울산|제주|세종)'
+          r'(?:[가-힣0-9\s]*(?:시|군|구)[가-힣0-9\s]*)?'
+          r'(?:[가-힣0-9\s]*(?:동|읍|면)[가-힣0-9\s]*)?'
+          r'(?:[가-힣0-9\s]*(?:로|길|대로))'
+          r'\s*\d+[가-힣\d\-]*',
+        ).firstMatch(_extractedContent!);
+        if (addressMatch != null) {
+          fallbackAddress = addressMatch.group(0)!.trim();
+        }
+      }
       final memo = Memo(
         title: tiktokInfo.title,
         content: _extractedContent!,
         category: '기타',
+        address: fallbackAddress,
+        searchKeyword: fallbackAddress == null ? ContentProcessingService.extractSearchKeyword(_extractedContent!) : null,
         sourceUrl: tiktokInfo.videoUrl,
       );
       await _databaseService.insertMemo(memo);
@@ -418,6 +438,7 @@ ${pageInfo.textContent}''';
         title: result.title.isNotEmpty ? result.title : pageTitle,
         content: finalContent,
         category: finalCategory,
+        searchKeyword: result.address.isEmpty ? ContentProcessingService.extractSearchKeyword(result.content.isNotEmpty ? result.content : rawContent) : null,
         sourceUrl: widget.sharedUrl,
       );
       await _databaseService.insertMemo(memo);
@@ -435,6 +456,7 @@ ${pageInfo.textContent}''';
         title: pageTitle,
         content: truncatedContent,
         category: detected ?? '기타',
+        searchKeyword: ContentProcessingService.extractSearchKeyword(rawContent),
         sourceUrl: widget.sharedUrl,
       );
       await _databaseService.insertMemo(memo);

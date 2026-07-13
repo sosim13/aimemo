@@ -22,7 +22,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 6,
+      version: 7,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -40,6 +40,7 @@ class DatabaseService {
         thumbnailUrl TEXT,
         imagePath TEXT,
         address TEXT,
+        searchKeyword TEXT,
         kakaoLat REAL,
         kakaoLng REAL,
         naverX REAL,
@@ -127,6 +128,11 @@ class DatabaseService {
     if (oldVersion < 6) {
       await db.execute(
         'ALTER TABLE memos ADD COLUMN address TEXT',
+      );
+    }
+    if (oldVersion < 7) {
+      await db.execute(
+        'ALTER TABLE memos ADD COLUMN searchKeyword TEXT',
       );
     }
   }

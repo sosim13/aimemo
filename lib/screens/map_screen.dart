@@ -124,27 +124,11 @@ class _MapScreenState extends State<MapScreen> {
 
       controller.addOverlay(marker);
     }
-
-    // Fit camera to markers if first load
-    if (_memos.isNotEmpty) {
-      final positions = _memos
-          .where((m) => m.kakaoLat != null && m.kakaoLng != null)
-          .map((m) => NLatLng(m.kakaoLat!, m.kakaoLng!))
-          .toList();
-      if (positions.isNotEmpty) {
-        controller.updateCamera(
-          NCameraUpdate.fitBounds(
-            NLatLngBounds.from(positions),
-            padding: const EdgeInsets.all(100),
-          ),
-        );
-      }
-    }
   }
 
-  /// Request location permission and enable location tracking on the map.
+  /// Request location permission, center camera on user's current position
+  /// at a street-level zoom, then enable location tracking mode.
   Future<void> _requestLocationAndTrack(NaverMapController controller) async {
-    // Check if location permission is already granted
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
@@ -161,7 +145,22 @@ class _MapScreenState extends State<MapScreen> {
       }
       return;
     }
-    // Permission granted — enable location tracking
+
+    // Move camera to last known position for an instant preview,
+    // then let follow mode refine it when fresh GPS arrives.
+    try {
+      final lastPos = await Geolocator.getLastKnownPosition();
+      if (lastPos != null && mounted) {
+        controller.updateCamera(NCameraUpdate.withParams(
+          target: NLatLng(lastPos.latitude, lastPos.longitude),
+          zoom: 14,
+        ));
+      }
+    } catch (_) {
+      // Ignore — follow mode will handle positioning
+    }
+
+    // Permission granted — enable live location tracking
     controller.setLocationTrackingMode(NLocationTrackingMode.follow);
   }
 

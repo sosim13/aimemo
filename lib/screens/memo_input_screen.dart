@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import '../models/memo.dart';
 import '../services/background_queue_service.dart';
 import '../services/category_detector.dart';
+import '../services/content_processing_service.dart';
 import '../services/database_service.dart';
 import '../services/llm_service.dart';
 import '../services/shared_content_parser.dart';
@@ -123,6 +124,7 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
       title: title,
       content: content,
       category: category,
+      searchKeyword: ContentProcessingService.extractSearchKeyword(content),
     ));
 
     if (!mounted) return;
