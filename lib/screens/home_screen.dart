@@ -10,10 +10,8 @@ import '../services/shared_content_parser.dart';
 import '../widgets/memo_card.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/category_chip.dart';
-import 'settings_screen.dart';
 import 'memo_input_screen.dart';
 import 'memo_detail_screen.dart';
-import 'chat_screen.dart';
 
 
 class HomeScreen extends StatefulWidget {
@@ -193,20 +191,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
-          if (!_isAiAvailable)
-            IconButton(
-              icon: Icon(Icons.warning_amber_rounded, color: Colors.orange[700]),
-              tooltip: 'AI 모델 연결 필요',
-              onPressed: () => _openSettings(),
-            ),
           IconButton(
             icon: const Icon(Icons.add_circle_outline),
             tooltip: '메모 추가',
             onPressed: () => _openMemoInput(),
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () => _openSettings(),
           ),
         ],
       ),
@@ -244,13 +232,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             subtitle: _isAiAvailable
                                 ? '상단 + 버튼을 눌러 메모를 추가하거나\nYouTube에서 영상을 공유해보세요!'
                                 : '설정에서 AI 모델 제공자를 연결해주세요.',
-                            action: !_isAiAvailable
-                                ? FilledButton.tonalIcon(
-                                    onPressed: _openSettings,
-                                    icon: const Icon(Icons.settings),
-                                    label: const Text('설정으로 이동'),
-                                  )
-                                : null,
+                            action: null,
                           )
                         : EmptyState(
                             icon: Icons.filter_alt_off,
@@ -275,10 +257,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       ),
           ),
         ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _openChat(),
-        child: const Icon(Icons.smart_toy_outlined),
       ),
     );
   }
@@ -307,22 +285,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         visualDensity: VisualDensity.compact,
       ),
     );
-  }
-
-  Future<void> _openChat() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const ChatScreen()),
-    );
-  }
-
-  Future<void> _openSettings() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const SettingsScreen()),
-    );
-    _isAiAvailable = await _llmService.isAvailable();
-    setState(() {});
   }
 
   Future<void> _openMemoInput() async {
