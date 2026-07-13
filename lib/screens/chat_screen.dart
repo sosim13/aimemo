@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/memo.dart';
 import '../models/chat_message.dart';
@@ -19,6 +20,9 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollController = ScrollController();
 
   bool _isAiAvailable = false;
+  DateTime? _generationStartTime;
+  int _elapsedSeconds = 0;
+  Timer? _elapsedTimer;
 
   @override
   void initState() {
@@ -33,6 +37,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _elapsedTimer?.cancel();
     _chatService.onStateChanged = null;
     _textController.dispose();
     _scrollController.dispose();
@@ -41,7 +46,19 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _onChatStateChanged() {
     if (mounted) {
-      setState(() {});
+      setState(() {
+        if (_chatService.isGenerating && _generationStartTime == null) {
+          // Generation just started — begin timing
+          _generationStartTime = DateTime.now();
+          _elapsedSeconds = 0;
+          _startElapsedTimer();
+        } else if (!_chatService.isGenerating && _generationStartTime != null) {
+          // Generation just finished — record elapsed time
+          _elapsedSeconds = DateTime.now().difference(_generationStartTime!).inSeconds;
+          _stopElapsedTimer();
+          _generationStartTime = null;
+        }
+      });
       _scrollToBottom();
     }
   }
@@ -117,6 +134,22 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _cancelGeneration() {
     _chatService.cancelGeneration();
+  }
+
+  void _startElapsedTimer() {
+    _elapsedTimer?.cancel();
+    _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && _chatService.isGenerating && _generationStartTime != null) {
+        setState(() {
+          _elapsedSeconds = DateTime.now().difference(_generationStartTime!).inSeconds;
+        });
+      }
+    });
+  }
+
+  void _stopElapsedTimer() {
+    _elapsedTimer?.cancel();
+    _elapsedTimer = null;
   }
 
   void _scrollToBottom() {
@@ -316,11 +349,13 @@ class _ChatScreenState extends State<ChatScreen> {
             ],
           ),
 
-          // Timestamp
+          // Timestamp (show elapsed time for AI responses)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
             child: Text(
-              _formatTime(message.timestamp),
+              !message.isUser
+                  ? _formatAiElapsed(message, _chatService.messages)
+                  : _formatTime(message.timestamp),
               style: TextStyle(
                 fontSize: 10,
                 color: Colors.grey[400],
@@ -412,7 +447,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 const SizedBox(width: 12),
                 Text(
-                  '답변 생성 중...',
+                  '${_formatDuration(_elapsedSeconds)} 생각 중...',
                   style: TextStyle(
                     fontSize: 13,
                     color: Colors.grey[600],
@@ -493,6 +528,24 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
+  }
+
+  String _formatDuration(int totalSeconds) {
+    final minutes = totalSeconds ~/ 60;
+    final seconds = totalSeconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  /// Format elapsed time for AI responses: find the preceding user message
+  /// and compute the generation duration.
+  String _formatAiElapsed(ChatMessage message, List<ChatMessage> allMessages) {
+    final msgIndex = allMessages.indexOf(message);
+    if (msgIndex <= 0) return '';
+    final prevMsg = allMessages[msgIndex - 1];
+    if (!prevMsg.isUser) return '';
+    final elapsedSec = message.timestamp.difference(prevMsg.timestamp).inSeconds;
+    if (elapsedSec < 1) return '';
+    return '⏱ ${_formatDuration(elapsedSec)}';
   }
 
   String _formatTime(DateTime time) {

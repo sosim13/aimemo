@@ -1,5 +1,6 @@
 import 'dart:io' show File;
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -659,12 +660,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
                   ),
                 ],
               ),
-              SelectableText(
-                memo.content,
-                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                      height: 1.6,
-                    ),
-              ),
+              _buildLinkifiedContent(memo.content),
             ],
 
             const SizedBox(height: 32),
@@ -679,6 +675,55 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
               ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildLinkifiedContent(String text) {
+    if (text.isEmpty) return const SizedBox.shrink();
+
+    final urlRegex = RegExp(
+      r'(https?://[^\s]+)',
+      caseSensitive: false,
+    );
+
+    final spans = <TextSpan>[];
+    int lastEnd = 0;
+
+    for (final match in urlRegex.allMatches(text)) {
+      if (match.start > lastEnd) {
+        spans.add(TextSpan(text: text.substring(lastEnd, match.start)));
+      }
+
+      final url = match.group(1)!;
+      spans.add(TextSpan(
+        text: url,
+        style: TextStyle(
+          color: Colors.blue[700],
+          decoration: TextDecoration.underline,
+        ),
+        recognizer: TapGestureRecognizer()
+          ..onTap = () => _openUrl(url),
+      ));
+
+      lastEnd = match.end;
+    }
+
+    if (lastEnd < text.length) {
+      spans.add(TextSpan(text: text.substring(lastEnd)));
+    }
+
+    if (spans.length == 1 && spans.first.recognizer == null) {
+      return SelectableText(
+        text,
+        style: Theme.of(context).textTheme.bodyLarge?.copyWith(height: 1.6),
+      );
+    }
+
+    return SelectableText.rich(
+      TextSpan(
+        style: Theme.of(context).textTheme.bodyLarge?.copyWith(height: 1.6),
+        children: spans,
       ),
     );
   }
