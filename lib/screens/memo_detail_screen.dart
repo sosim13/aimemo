@@ -116,8 +116,31 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
       updatedAt: DateTime.now(),
     );
 
-    await _databaseService.updateMemo(updated);
+    // copyWith cannot distinguish "set to null" from "not provided" (both are null),
+    // so when address is cleared, rebuild with null explicitly.
     var savedMemo = updated;
+    if (address.isEmpty) {
+      savedMemo = Memo(
+        id: updated.id,
+        title: updated.title,
+        content: updated.content,
+        category: updated.category,
+        sourceUrl: updated.sourceUrl,
+        youtubeVideoId: updated.youtubeVideoId,
+        thumbnailUrl: updated.thumbnailUrl,
+        imagePath: updated.imagePath,
+        address: null,
+        searchKeyword: updated.searchKeyword,
+        kakaoLat: updated.kakaoLat,
+        kakaoLng: updated.kakaoLng,
+        naverX: updated.naverX,
+        naverY: updated.naverY,
+        createdAt: updated.createdAt,
+        updatedAt: updated.updatedAt,
+      );
+    }
+
+    await _databaseService.updateMemo(savedMemo);
 
     // Trigger geocoding if address was provided
     if (address.isNotEmpty && addressChanged) {
