@@ -36,6 +36,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   String? _selectedCategory;
   bool _isLoading = true;
   bool _isAiAvailable = false;
+
+  /// Simple text search state
+  bool _isSearching = false;
+  String _searchQuery = '';
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
   StreamSubscription<ProcessingResult>? _processingSubscription;
 
   @override
@@ -63,6 +69,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     _scrollController.dispose();
+    _searchController.dispose();
+    _searchFocusNode.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _processingSubscription?.cancel();
     super.dispose();
@@ -144,8 +152,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   List<Memo> get _filteredMemos {
-    if (_selectedCategory == null) return _memos;
-    return _memos.where((m) => m.category == _selectedCategory).toList();
+    var memos = _memos;
+
+    // Category filter
+    if (_selectedCategory != null) {
+      memos = memos.where((m) => m.category == _selectedCategory).toList();
+    }
+
+    // Simple text search filter (title, content, category)
+    if (_searchQuery.isNotEmpty) {
+      final query = _searchQuery.toLowerCase();
+      memos = memos.where((m) =>
+        m.title.toLowerCase().contains(query) ||
+        m.content.toLowerCase().contains(query) ||
+        m.category.toLowerCase().contains(query)
+      ).toList();
+    }
+
+    return memos;
   }
 
   Future<void> _deleteMemo(Memo memo) async {
@@ -192,6 +216,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
           IconButton(
+            icon: Icon(_isSearching ? Icons.search_off : Icons.search),
+            tooltip: _isSearching ? '검색 닫기' : '메모 검색',
+            onPressed: () => _toggleSearch(),
+          ),
+          IconButton(
             icon: const Icon(Icons.add_circle_outline),
             tooltip: '메모 추가',
             onPressed: () => _openMemoInput(),
@@ -220,12 +249,54 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ),
             ),
 
+          // Search bar
+          if (_isSearching)
+            Container(
+              color: Theme.of(context).colorScheme.surfaceContainerLow,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: TextField(
+                controller: _searchController,
+                focusNode: _searchFocusNode,
+                decoration: InputDecoration(
+                  hintText: '제목, 내용, 카테고리 검색...',
+                  prefixIcon: const Icon(Icons.search, size: 20),
+                  suffixIcon: _searchController.text.isNotEmpty
+                      ? IconButton(
+                          icon: const Icon(Icons.clear, size: 18),
+                          onPressed: () {
+                            _searchController.clear();
+                            setState(() => _searchQuery = '');
+                          },
+                        )
+                      : null,
+                  filled: true,
+                  fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(24),
+                    borderSide: BorderSide.none,
+                  ),
+                  isDense: true,
+                ),
+                style: const TextStyle(fontSize: 14),
+                onChanged: (value) {
+                  setState(() => _searchQuery = value);
+                },
+              ),
+            ),
+
           // Memo list
           Expanded(
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator())
                 : _filteredMemos.isEmpty
-                    ? (_selectedCategory == null
+                    ? (_searchQuery.isNotEmpty
+                        ? EmptyState(
+                            icon: Icons.search_off,
+                            title: '검색 결과가 없습니다',
+                            subtitle: '"$_searchQuery"에 해당하는 메모가 없습니다',
+                          )
+                        : _selectedCategory == null
                         ? EmptyState(
                             icon: Icons.note_alt_outlined,
                             title: '아직 메모가 없습니다',
@@ -295,6 +366,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (result == true && mounted) {
       await _loadMemos();
     }
+  }
+
+  void _toggleSearch() {
+    setState(() {
+      _isSearching = !_isSearching;
+      if (!_isSearching) {
+        _searchQuery = '';
+        _searchController.clear();
+        _searchFocusNode.unfocus();
+      } else {
+        // Focus the search field after the frame renders
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _searchFocusNode.requestFocus();
+        });
+      }
+    });
   }
 
   Future<void> _openMemoDetail(Memo memo) async {

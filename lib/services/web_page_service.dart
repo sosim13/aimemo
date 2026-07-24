@@ -31,7 +31,14 @@ class WebPageService {
     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
   };
 
+  /// Naver Map place internal API endpoint.
+  static const _naverPlaceApi = 'https://map.naver.com/p/api/place/summary';
+
   Future<WebPageInfo?> fetchPageContent(String url) async {
+    // Route naver.me short URLs / map.naver.com place URLs to Naver API path
+    final naverResult = await _tryFetchNaverPlace(url);
+    if (naverResult != null) return naverResult;
+
     try {
       final fetchUrl = _normalizeUrl(url);
       await _debug.log('WPS: Fetching $fetchUrl');
@@ -129,6 +136,184 @@ class WebPageService {
     }
 
     return url;
+  }
+
+  /// Check if URL is a Naver Map link (short URL or direct place URL).
+  /// Returns the place ID if matched, null otherwise.
+  String? _parseNaverPlaceId(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return null;
+    final host = uri.host;
+
+    // naver.me/XXXXX — Naver short URL (needs redirect resolution)
+    if (host == 'naver.me') return '_NEEDS_RESOLVE_';
+
+    // map.naver.com/p/entry/place/{placeId}
+    if (host == 'map.naver.com' || host == 'm.place.naver.com') {
+      final match = RegExp(r'/place/(\d+)').firstMatch(uri.path);
+      if (match != null) return match.group(1)!;
+    }
+
+    return null;
+  }
+
+  /// Resolve naver.me short URL by capturing the HTTP 307 redirect Location header.
+  /// Uses the http package's followRedirects=false to get the raw redirect response.
+  Future<String?> _resolveNaverShortUrl(String shortUrl) async {
+    try {
+      final client = http.Client();
+      try {
+        final request = http.Request('GET', Uri.parse(shortUrl));
+        request.headers.addAll(_headers);
+        request.followRedirects = false; // Get 307 directly, don't follow
+
+        final streamedResponse = await client.send(request);
+        final statusCode = streamedResponse.statusCode;
+
+        // Drain body to avoid resource leak
+        await streamedResponse.stream.drain();
+
+        if (statusCode >= 300 && statusCode < 400) {
+          final location = streamedResponse.headers['location'];
+          if (location == null || location.isEmpty) {
+            await _debug.log('NMF: No Location header in redirect response');
+            return null;
+          }
+
+          await _debug.log('NMF: Redirect location: $location');
+
+          // Try pinId from query params (naver.me → map.naver.com?pinId=...)
+          final redirectUri = Uri.tryParse(location);
+          if (redirectUri != null) {
+            final pinId = redirectUri.queryParameters['pinId'];
+            if (pinId != null && pinId.isNotEmpty) {
+              await _debug.log('NMF: Extracted place ID from pinId: $pinId');
+              return pinId;
+            }
+
+            // Fallback: /place/{id} in path
+            final placeMatch =
+                RegExp(r'/place/(\d+)').firstMatch(redirectUri.path);
+            if (placeMatch != null) {
+              await _debug.log(
+                  'NMF: Extracted place ID from path: ${placeMatch.group(1)}');
+              return placeMatch.group(1)!;
+            }
+          }
+        }
+
+        await _debug.log(
+            'NMF: No redirect (status=$statusCode) for $shortUrl');
+        return null;
+      } finally {
+        client.close();
+      }
+    } catch (e) {
+      await _debug.log('NMF: Exception resolving short URL: $e');
+      return null;
+    }
+  }
+
+  /// Try to fetch place info from Naver Map's internal API.
+  /// Handles both naver.me short URLs and direct map.naver.com place URLs.
+  Future<WebPageInfo?> _tryFetchNaverPlace(String url) async {
+    final placeId = _parseNaverPlaceId(url);
+
+    if (placeId == null) return null; // Not a Naver Map URL
+
+    // Need to resolve short URL to get place ID
+    String? resolvedPlaceId = placeId;
+
+    if (placeId == '_NEEDS_RESOLVE_') {
+      await _debug.log('NMF: Resolving naver.me short URL: $url');
+      resolvedPlaceId = await _resolveNaverShortUrl(url);
+      if (resolvedPlaceId == null) {
+        await _debug.log('NMF: Failed to resolve place ID from $url');
+        return null;
+      }
+    }
+
+    // The final map URL for reference (not used for API call)
+    final mapUrl = 'https://map.naver.com/p/entry/place/$resolvedPlaceId';
+    return _fetchNaverPlaceSummary(resolvedPlaceId, mapUrl);
+  }
+
+  /// Fetch place summary from Naver internal API and return as WebPageInfo.
+  Future<WebPageInfo?> _fetchNaverPlaceSummary(
+      String placeId, String finalUrl) async {
+    try {
+      final apiUrl = '$_naverPlaceApi/$placeId';
+      await _debug.log('NMF: Fetching place summary: $apiUrl');
+
+      final response = await http.get(
+        Uri.parse(apiUrl),
+        headers: {
+          'User-Agent': _headers['User-Agent']!,
+          'Referer': 'https://map.naver.com/',
+          'Accept': 'application/json',
+        },
+      );
+
+      if (response.statusCode != 200) {
+        await _debug.log(
+            'NMF: API returned ${response.statusCode} for place $placeId');
+        return null;
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final detail = data['data']?['placeDetail'] as Map<String, dynamic>?;
+      if (detail == null) {
+        await _debug.log('NMF: No placeDetail in API response');
+        return null;
+      }
+
+      final name = detail['name'] as String? ?? '';
+      final category =
+          (detail['category'] as Map<String, dynamic>?)?['category']
+              as String? ??
+          '';
+      final address = detail['address'] as Map<String, dynamic>?;
+      final roadAddress = address?['roadAddress'] as String? ?? '';
+      final formattedAddress = address?['formattedAddress'] as String? ?? '';
+      final reviewText =
+          (detail['visitorReviews'] as Map<String, dynamic>?)?['displayText']
+              as String? ??
+          '';
+
+      // Build description (compact, for AI context)
+      final descParts = <String>[
+        if (category.isNotEmpty) category,
+        if (roadAddress.isNotEmpty) roadAddress,
+        if (reviewText.isNotEmpty) reviewText,
+      ];
+
+      // Build full text content (for AI analysis)
+      final textParts = <String>[
+        if (name.isNotEmpty) '장소: $name',
+        if (category.isNotEmpty) '카테고리: $category',
+        if (roadAddress.isNotEmpty) '도로명주소: $roadAddress',
+        if (formattedAddress.isNotEmpty &&
+            formattedAddress != roadAddress)
+          '지번주소: $formattedAddress',
+        if (reviewText.isNotEmpty) reviewText,
+      ];
+
+      final description = descParts.join(', ');
+      final textContent = textParts.join('\n');
+
+      await _debug.log(
+          'NMF: name="$name" desc_len=${description.length} text_len=${textContent.length}');
+
+      return WebPageInfo(
+        url: finalUrl,
+        title: name,
+        description: description,
+        textContent: textContent,
+      );
+    } catch (e) {
+      await _debug.log('NMF: Exception: $e');
+      return null;
+    }
   }
 
   String? _extractJsRedirect(String html) {
