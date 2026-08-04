@@ -6,6 +6,7 @@ import '../models/memo.dart';
 import '../services/database_service.dart';
 import '../services/secure_storage_service.dart';
 import '../services/content_processing_service.dart';
+import '../widgets/category_chip.dart';
 import 'memo_detail_screen.dart';
 
 class MapScreen extends StatefulWidget {
@@ -21,9 +22,11 @@ class _MapScreenState extends State<MapScreen> {
   final _processingService = ContentProcessingService();
 
   List<Memo> _memos = [];
+  List<Memo> _visibleMemos = [];
   Memo? _selectedMemo;
   bool _isLoading = true;
   bool _mapInitialized = false;
+  bool _showList = false;
   NaverMapController? _mapController;
   StreamSubscription<ProcessingResult>? _processingSubscription;
 
@@ -95,6 +98,32 @@ class _MapScreenState extends State<MapScreen> {
 
     // Rebuild markers on the existing map
     _rebuildMarkers();
+
+    // Keep the visible-memo list in sync with the new data
+    _refreshVisibleMemos();
+  }
+
+  /// Recompute [_visibleMemos] to only the memos whose markers are inside the
+  /// current camera viewport. Runs on camera idle and when the list is opened.
+  Future<void> _refreshVisibleMemos() async {
+    final controller = _mapController;
+    if (controller == null) {
+      if (mounted) setState(() => _visibleMemos = []);
+      return;
+    }
+    try {
+      final bounds = await controller.getContentBounds();
+      if (!mounted) return;
+      setState(() {
+        _visibleMemos = _memos.where((m) {
+          if (m.kakaoLat == null || m.kakaoLng == null) return false;
+          return bounds.containsPoint(NLatLng(m.kakaoLat!, m.kakaoLng!));
+        }).toList();
+      });
+    } catch (_) {
+      // Bounds unavailable — fall back to showing every memo
+      if (mounted) setState(() => _visibleMemos = List.of(_memos));
+    }
   }
 
   void _rebuildMarkers() {
@@ -197,6 +226,20 @@ class _MapScreenState extends State<MapScreen> {
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
           IconButton(
+            icon: Icon(_showList
+                ? Icons.map_outlined
+                : Icons.format_list_bulleted),
+            tooltip: _showList ? '지도 보기' : '목록 보기',
+            onPressed: () {
+              setState(() {
+                _showList = !_showList;
+                if (_showList) _selectedMemo = null;
+              });
+              // Fetch the latest viewport contents when opening the list
+              if (_showList) _refreshVisibleMemos();
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: '새로고침',
             onPressed: _isLoading ? null : _refreshMarkers,
@@ -259,6 +302,18 @@ class _MapScreenState extends State<MapScreen> {
       );
     }
 
+    // IndexedStack keeps the NaverMap widget alive while the list is shown,
+    // so toggling views doesn't re-initialize the map.
+    return IndexedStack(
+      index: _showList ? 1 : 0,
+      children: [
+        _buildMapView(),
+        _buildMemoListView(),
+      ],
+    );
+  }
+
+  Widget _buildMapView() {
     return Stack(
       children: [
         // Naver Map
@@ -281,12 +336,162 @@ class _MapScreenState extends State<MapScreen> {
               setState(() => _selectedMemo = null);
             }
           },
+          onCameraIdle: () => _refreshVisibleMemos(),
         ),
 
         // Selected memo info card overlay
         if (_selectedMemo != null) _buildInfoCard(),
       ],
     );
+  }
+
+  /// List view of the memos whose markers are currently visible on the map —
+  /// handy when markers overlap and are hard to tap.
+  Widget _buildMemoListView() {
+    if (_visibleMemos.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.map_outlined, size: 64, color: Colors.grey[300]),
+            const SizedBox(height: 16),
+            Text(
+              '현재 지도에 보이는 마커가 없습니다',
+              style: TextStyle(fontSize: 16, color: Colors.grey[500]),
+            ),
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Text(
+                '지도를 이동하거나 축소하면\n그 범위에 있는 메모만 목록에 표시됩니다',
+                style: TextStyle(fontSize: 13, color: Colors.grey[400]),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            const SizedBox(height: 24),
+            OutlinedButton.icon(
+              onPressed: _refreshVisibleMemos,
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('다시 불러오기'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.only(top: 12, bottom: 24),
+      itemCount: _visibleMemos.length + 1, // +1 for the header row
+      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      itemBuilder: (context, index) {
+        if (index == 0) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text(
+              '지도에 보이는 메모 ${_visibleMemos.length}개',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: Colors.grey[600],
+              ),
+            ),
+          );
+        }
+        return _buildListTile(_visibleMemos[index - 1]);
+      },
+    );
+  }
+
+  Widget _buildListTile(Memo memo) {
+    // Show the most useful location hint: address > search keyword > coords
+    final locationHint = memo.address ??
+        memo.searchKeyword ??
+        '${memo.kakaoLat?.toStringAsFixed(4)}, ${memo.kakaoLng?.toStringAsFixed(4)}';
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      elevation: 1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => _openMemoDetail(memo),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  CategoryChip(category: memo.category),
+                  const Spacer(),
+                  // "지도에서 보기" — center the camera on this memo and
+                  // switch back to the map view
+                  IconButton(
+                    icon: const Icon(Icons.map, size: 18),
+                    color: Colors.blueAccent,
+                    tooltip: '지도에서 보기',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => _focusMemoOnMap(memo),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                memo.title,
+                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  const Icon(Icons.location_on, size: 14, color: Colors.redAccent),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      locationHint,
+                      style: TextStyle(fontSize: 13, color: Colors.grey[500]),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              if (memo.content.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  memo.content,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey[600],
+                    height: 1.4,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Center the camera on [memo]'s marker, show its info card, and return
+  /// to the map view.
+  void _focusMemoOnMap(Memo memo) {
+    final controller = _mapController;
+    if (controller != null && memo.kakaoLat != null && memo.kakaoLng != null) {
+      controller.updateCamera(NCameraUpdate.withParams(
+        target: NLatLng(memo.kakaoLat!, memo.kakaoLng!),
+        zoom: 16,
+      ));
+    }
+    setState(() {
+      _selectedMemo = memo;
+      _showList = false;
+    });
   }
 
   Widget _buildInfoCard() {
