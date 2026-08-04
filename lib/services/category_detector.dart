@@ -73,6 +73,27 @@ class CategoryDetector {
     '라고', '로서', '로써', '처럼', '보다', '마저', '조차', '밖에',
   ];
 
+  /// Keywords that decisively indicate a restaurant/cafe VISIT (place review
+  /// or recommendation), used to break ties between '맛집 & 카페' and
+  /// '요리 & 레시피' where the plain keyword lists overlap heavily.
+  /// Note: '예약' is intentionally excluded — it's already a regular 맛집
+  /// keyword and appears in travel/schedule contexts (hotel reservation).
+  static const _decisiveRestaurant = [
+    '웨이팅', '영업시간', '오픈시간', '휴무', '별점', '재방문',
+    '분위기', '인테리어', '가격대', '현지인맛집', '맛집투어', '맛집탐방',
+    '대기줄', '줄서서', '단골손님', '오픈런',
+  ];
+
+  /// Keywords that decisively indicate a COOKING instruction (recipe /
+  /// how-to-make), used to break ties between '맛집 & 카페' and
+  /// '요리 & 레시피'.
+  static const _decisiveRecipe = [
+    '만드는 법', '만드는법', '조리법', '재료 준비', '양념장', '중불', '약불',
+    '강불', '불 조절', '삶아서', '볶아서', '썰어서', '다져서', '끓여서',
+    '구워서', '튀겨서', '뚝배기', '프라이팬', '팬에', '기름을 두르',
+    '완성입니다', '접시에 담아',
+  ];
+
   /// Check if [text] contains [keyword], also matching common Korean particles
   /// attached to the keyword (e.g. "프로그래밍" matches "프로그래밍을", "프로그래밍은").
   static bool _has(String text, String keyword) {
@@ -206,8 +227,7 @@ class CategoryDetector {
       '테이크아웃', '포장', '배달', '예약', '웨이팅',
       '단골', '오마카세', '일식', '중식', '양식', '한식',
       '분식', '야식', '맛스타그램', '먹스타그램',
-      '맛있당', '맛있어', '핫플', '성수', '홍대', '강남',
-      '신사', '가로수길', '이태원', '용리단길',
+      '맛있당', '맛있어', '핫플',
       '커피맛집', '빵맛집', '고기맛집', '해산물',
       '맛집후기', '맛집 후기', '맛집추천', '맛집 추천',
       '맛집투어', '맛집탐방', '맛집 탐방',
@@ -432,6 +452,34 @@ class CategoryDetector {
       if (cat == '기타') continue;
       if (_has(text, cat)) {
         scores[cat] = (scores[cat] ?? 0) + 100; // very strong signal
+      }
+    }
+
+    // Decisive signals: break the '맛집 & 카페' vs '요리 & 레시피' tie.
+    // Only fire when the text already shows food-related context, so words
+    // like "예약" in travel/schedule contexts don't cause false positives.
+    final hasFoodContext = (scores['요리 & 레시피'] ?? 0) > 0 ||
+        (scores['맛집 & 카페'] ?? 0) > 0;
+    if (hasFoodContext) {
+      var restaurantHit = false;
+      for (final kw in _decisiveRestaurant) {
+        if (_has(text, kw)) {
+          restaurantHit = true;
+          break;
+        }
+      }
+      if (restaurantHit) {
+        scores['맛집 & 카페'] = (scores['맛집 & 카페'] ?? 0) + 50;
+      }
+      var recipeHit = false;
+      for (final kw in _decisiveRecipe) {
+        if (_has(text, kw)) {
+          recipeHit = true;
+          break;
+        }
+      }
+      if (recipeHit) {
+        scores['요리 & 레시피'] = (scores['요리 & 레시피'] ?? 0) + 50;
       }
     }
 

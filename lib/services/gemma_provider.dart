@@ -238,6 +238,10 @@ class GemmaProvider implements LlmProvider {
       throw Exception(msg);
     }
 
+    // Keep the full content for the keyword-based category fallback
+    // (the model itself only sees a truncated version).
+    final fullContent = content;
+
     // Truncate content if too long for the model's context window
     if (content.length > _maxContentChars) {
       GemmaDiag.logSync('Content too long (${content.length} chars), truncating to $_maxContentChars');
@@ -272,7 +276,7 @@ class GemmaProvider implements LlmProvider {
         response,
         sourceUrl: sourceUrl,
         youtubeVideoId: youtubeVideoId,
-        originalContent: content,
+        originalContent: fullContent,
       );
     } catch (e) {
       // If the session was closed by cancel(), convert to a clean error
@@ -403,6 +407,11 @@ $content
 카테고리는 반드시 아래 목록 중 하나만 선택해:
 개발, AI & 데이터, 미술 & 디자인, 기획 & 비즈니스, 마케팅 & 브랜딩, 재테크 & 금융, 법률 & 계약, 이슈 & 뉴스, 요리 & 레시피, 맛집 & 카페, 쇼핑 & 위시리스트, 여행 & 휴가, 건강 & 운동, 인테리어 & 소품, 반려동물, 할 일 & To-Do, 일정 & 약속, 아이디어 & 영감, 명언 & 좋은 글귀, 인간관계 & 경조사, 독서 & 리뷰, 어학 & 외국어, 시험 & 자격증, 인문 & 교양, 과학 & 다큐, 영화 & 드라마, 음악 & 공연, 웹툰 & 소설, 게임, 육아 & 가족, 기타
 
+카테고리 선택 기준 (중요):
+- 맛집 & 카페: 특정 식당·카페를 소개하거나 방문 후기·추천·위치·가격·분위기를 다루는 영상 (먹으러 가는 곳)
+- 요리 & 레시피: 음식을 직접 만드는 방법·조리 과정·재료·조리법을 다루는 영상 (직접 만드는 법)
+- 식당에 대한 소개/후기/추천이면 '맛집 & 카페', 요리하는 과정이면 '요리 & 레시피'
+
 반드시 아래 형식만 출력해줘 (다른 말 하지 마, 카테고리는 위 목록 중 하나만):
 
 ## 제목
@@ -428,6 +437,18 @@ $content
 - 상세 내용 1
 - 상세 내용 2
 - 상세 내용 3
+
+아래는 카테고리 선택 예시다. 예시를 그대로 출력하지 말고, 반드시 위 형식만 출력해라.
+
+예시 1:
+내용: 성수동에서 유명한 파스타 맛집에 다녀왔어요. 웨이팅 30분, 시그니처 메뉴는 크림 파스타예요. 분위기 좋고 재방문 의사 있습니다.
+## 카테고리
+맛집 & 카페
+
+예시 2:
+내용: 오늘은 집에서 크림 파스타를 만들어볼게요. 먼저 재료를 준비하고, 중불에서 5분간 볶아주세요. 완성되면 접시에 담아 파슬리를 뿌립니다.
+## 카테고리
+요리 & 레시피
 ''';
   }
 }

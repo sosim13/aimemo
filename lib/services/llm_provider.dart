@@ -127,6 +127,43 @@ class AiAnalysisResult {
     this.youtubeVideoId,
   });
 
+  /// Normalize an AI-generated category string to a canonical [AppCategories]
+  /// name. Returns null if the raw value isn't a recognizable category.
+  static String? _normalizeCategory(String? raw) {
+    if (raw == null) return null;
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    if (trimmed.contains('없음') || trimmed.contains('없습니다')) return null;
+
+    final canonical = AppCategories.normalize(trimmed);
+    if (canonical != null) return canonical;
+
+    // Alias mapping for common variants produced by small local models
+    const aliases = {
+      '요리 레시피': '요리 & 레시피',
+      '요리/레시피': '요리 & 레시피',
+      '요리&레시피': '요리 & 레시피',
+      '레시피': '요리 & 레시피',
+      '맛집': '맛집 & 카페',
+      '카페': '맛집 & 카페',
+      '맛집/카페': '맛집 & 카페',
+      '맛집 카페': '맛집 & 카페',
+      '식당': '맛집 & 카페',
+    };
+    final alias = aliases[trimmed];
+    if (alias != null) return alias;
+
+    // Last resort: substring match against each canonical category name
+    for (final cat in AppCategories.all) {
+      if (cat == '기타') continue;
+      if (trimmed.contains(cat) ||
+          trimmed.contains(cat.replaceAll(' & ', ' '))) {
+        return cat;
+      }
+    }
+    return null;
+  }
+
   factory AiAnalysisResult.fromText(String text,
       {String? sourceUrl,
       String? youtubeVideoId,
@@ -137,10 +174,24 @@ class AiAnalysisResult {
     List<String> keywords = [];
     String address = '';
 
-    // PRIMARY: Use keyword-based detection on the original content (most reliable)
-    // AI models often fail to follow structured output format for categories,
-    // but keyword matching on the actual content is deterministic.
-    if (originalContent != null && originalContent.isNotEmpty) {
+    // PRIMARY: Trust the AI's category answer (normalized to a canonical name).
+    // The model sees the content and its functional judgment — "place review /
+    // where to eat" vs "cooking instructions / how to make" — is more reliable
+    // than keyword counting for the 맛집 & 카페 / 요리 & 레시피 pair, whose
+    // keyword lists overlap heavily.
+    final catMatch = RegExp(r'##\s*카테고리\s*\n(.+?)(?:\n##|\n$|$)',
+            caseSensitive: false, dotAll: true)
+        .firstMatch(text);
+    final aiCategory = _normalizeCategory(catMatch?.group(1));
+    if (aiCategory != null && aiCategory != '기타') {
+      category = aiCategory;
+    }
+
+    // FALLBACK 1: keyword-based detection on the original content (deterministic,
+    // used only when the AI didn't produce a valid category).
+    if (category == '기타' &&
+        originalContent != null &&
+        originalContent.isNotEmpty) {
       final detected = CategoryDetector.detect(originalContent);
       if (detected != null && detected != '기타') {
         category = detected;
