@@ -1,7 +1,9 @@
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
+import '../models/book.dart';
 import '../models/memo.dart';
 import '../models/queue_state.dart';
+import '../models/reading_session.dart';
 
 class DatabaseService {
   static final DatabaseService _instance = DatabaseService._internal();
@@ -22,7 +24,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 7,
+      version: 8,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -75,6 +77,43 @@ class DatabaseService {
 
     await db.execute('''
       CREATE INDEX idx_history_created_at ON processing_history(createdAt)
+    ''');
+
+    // Reading Tracker tables (added in version 8).
+    await db.execute('''
+      CREATE TABLE books (
+        bookId TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        author TEXT NOT NULL DEFAULT '',
+        coverThumbnailPath TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT '독서',
+        totalReadCount INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX idx_books_title ON books(title)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE reading_sessions (
+        sessionId TEXT PRIMARY KEY,
+        bookId TEXT NOT NULL,
+        readRound INTEGER NOT NULL DEFAULT 1,
+        firstStartDate TEXT NOT NULL,
+        completedDate TEXT,
+        accumulatedActiveTime INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'READING',
+        FOREIGN KEY (bookId) REFERENCES books(bookId) ON DELETE CASCADE
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX idx_sessions_bookId ON reading_sessions(bookId)
+    ''');
+
+    await db.execute('''
+      CREATE INDEX idx_sessions_status ON reading_sessions(status)
     ''');
   }
 
@@ -134,6 +173,39 @@ class DatabaseService {
       await db.execute(
         'ALTER TABLE memos ADD COLUMN searchKeyword TEXT',
       );
+    }
+    if (oldVersion < 8) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS books (
+          bookId TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          author TEXT NOT NULL DEFAULT '',
+          coverThumbnailPath TEXT NOT NULL,
+          category TEXT NOT NULL DEFAULT '독서',
+          totalReadCount INTEGER NOT NULL DEFAULT 0
+        )
+      ''');
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_books_title ON books(title)
+      ''');
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS reading_sessions (
+          sessionId TEXT PRIMARY KEY,
+          bookId TEXT NOT NULL,
+          readRound INTEGER NOT NULL DEFAULT 1,
+          firstStartDate TEXT NOT NULL,
+          completedDate TEXT,
+          accumulatedActiveTime INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'READING',
+          FOREIGN KEY (bookId) REFERENCES books(bookId) ON DELETE CASCADE
+        )
+      ''');
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_sessions_bookId ON reading_sessions(bookId)
+      ''');
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_sessions_status ON reading_sessions(status)
+      ''');
     }
   }
 
@@ -284,6 +356,91 @@ class DatabaseService {
     final result =
         await db.rawQuery('SELECT COUNT(*) as cnt FROM processing_history');
     return Sqflite.firstIntValue(result) ?? 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Books CRUD (Reading Tracker)
+  // ---------------------------------------------------------------------------
+
+  Future<int> insertBook(Book book) async {
+    final db = await database;
+    return await db.insert('books', book.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<List<Book>> getAllBooks() async {
+    final db = await database;
+    final maps =
+        await db.query('books', orderBy: 'totalReadCount DESC, title ASC');
+    return maps.map((m) => Book.fromMap(m)).toList();
+  }
+
+  Future<Book?> getBookById(String bookId) async {
+    final db = await database;
+    final maps = await db.query(
+      'books',
+      where: 'bookId = ?',
+      whereArgs: [bookId],
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return Book.fromMap(maps.first);
+  }
+
+  Future<int> updateBook(Book book) async {
+    final db = await database;
+    return await db.update(
+      'books',
+      book.toMap(),
+      where: 'bookId = ?',
+      whereArgs: [book.bookId],
+    );
+  }
+
+  Future<int> deleteBook(String bookId) async {
+    final db = await database;
+    // Delete dependent sessions first (sqflite doesn't enforce FK CASCADE
+    // unless PRAGMA foreign_keys = ON, which we don't set globally).
+    await db.delete('reading_sessions',
+        where: 'bookId = ?', whereArgs: [bookId]);
+    return await db.delete('books', where: 'bookId = ?', whereArgs: [bookId]);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reading Sessions CRUD
+  // ---------------------------------------------------------------------------
+
+  Future<int> insertReadingSession(ReadingSession session) async {
+    final db = await database;
+    return await db.insert('reading_sessions', session.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<int> updateReadingSession(ReadingSession session) async {
+    final db = await database;
+    return await db.update(
+      'reading_sessions',
+      session.toMap(),
+      where: 'sessionId = ?',
+      whereArgs: [session.sessionId],
+    );
+  }
+
+  Future<List<ReadingSession>> getReadingSessionsForBook(String bookId) async {
+    final db = await database;
+    final maps = await db.query(
+      'reading_sessions',
+      where: 'bookId = ?',
+      whereArgs: [bookId],
+      orderBy: 'readRound ASC',
+    );
+    return maps.map((m) => ReadingSession.fromMap(m)).toList();
+  }
+
+  Future<int> deleteReadingSession(String sessionId) async {
+    final db = await database;
+    return await db.delete('reading_sessions',
+        where: 'sessionId = ?', whereArgs: [sessionId]);
   }
 
   Future<void> close() async {

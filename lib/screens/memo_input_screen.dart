@@ -1,14 +1,18 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../models/book.dart';
 import '../models/memo.dart';
+import '../models/reading_session.dart';
+import '../screens/reading/camera_scan_screen.dart';
+import '../screens/reading/reading_timer_screen.dart';
 import '../services/background_queue_service.dart';
+import '../services/book_vision_service.dart';
 import '../services/category_detector.dart';
 import '../services/content_processing_service.dart';
 import '../services/database_service.dart';
 import '../services/llm_service.dart';
+import '../services/reading_service.dart';
 import '../services/shared_content_parser.dart';
 import '../services/tiktok_service.dart';
 import '../services/url_handler_service.dart';
@@ -145,10 +149,145 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
       appBar: AppBar(
         title: const Text('메모 작성'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.menu_book_outlined),
+            tooltip: '독서 기록 시작',
+            onPressed: _openReadingScanner,
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: buildMemoForm(),
+      ),
+    );
+  }
+
+  /// Reading Tracker entry point — opens the camera, scans the cover,
+  /// matches against existing books, then jumps into the timer screen.
+  ///
+  /// The flow:
+  ///   1. Open [CameraScanScreen]. User captures the cover.
+  ///   2. Gemma 4 E2B recognizes the title & author and crops the cover
+  ///      to a local thumbnail.
+  ///   3. Look the title up against the local DB.
+  ///      - Active (READING/PAUSED) session: show [ReadingTimerScreen]
+  ///        with the existing book for "이어서 읽기".
+  ///      - Only COMPLETED sessions: show [ReadingTimerScreen] with
+  ///        [ReadingTimerScreen.forceNewRound] for "다시 읽기".
+  ///      - No match at all: open [ReadingTimerScreen] with the
+  ///        [ScanResult] to register a brand-new book.
+  Future<void> _openReadingScanner() async {
+    if (!_isAiAvailable) {
+      _showSnackBar(
+          '독서 스캔은 온디바이스 AI 모델이 필요합니다. 설정에서 모델을 선택해주세요.',
+          isError: true);
+      return;
+    }
+
+    final scanResult = await Navigator.push<ScanResult>(
+      context,
+      MaterialPageRoute(builder: (_) => const CameraScanScreen()),
+    );
+    if (scanResult == null || !mounted) return;
+
+    final readingService = ReadingService();
+    final existing = await readingService.findBookByTitle(scanResult.title);
+
+    Book? book;
+    bool forceNewRound = false;
+
+    if (existing != null) {
+      final active =
+          await readingService.getActiveSessionForBook(existing.bookId);
+      if (active != null) {
+        // Reading is in progress (READING) so they can resume implicitly in
+        // the timer screen. PAUSED sessions also fall here for one-tap
+        // resume; we surface the choice in a quick dialog.
+        book = existing;
+        if (active.status == ReadingSessionStatus.paused) {
+          // Confirm resume vs start a fresh round, since paused ≠ forced.
+          final decision = await _askResumeOrReread();
+          if (decision == null) return; // cancelled
+          if (decision) {
+            // Resume — open timer with the existing book, no new round.
+            book = existing;
+            forceNewRound = false;
+          } else {
+            // Treat as a fresh round.
+            book = existing;
+            forceNewRound = true;
+          }
+        }
+      } else {
+        // All sessions completed (or no session) — offer to re-read.
+        final decision = await _askReread();
+        if (decision != true) return;
+        book = existing;
+        forceNewRound = true;
+      }
+    }
+
+    if (!mounted) return;
+    await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ReadingTimerScreen(
+          existingBook: book,
+          scanResult: book == null ? scanResult : null,
+          forceNewRound: forceNewRound,
+        ),
+      ),
+    );
+    // No setState needed — we navigated to a self-contained flow.
+  }
+
+  /// Quick dialog: "이어서 읽기" (resume) vs "새 회차 시작" (re-read) for a
+  /// paused book. Returns `true` for resume, `false` for re-read, `null`
+  /// when cancelled.
+  Future<bool?> _askResumeOrReread() {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('이어서 읽기'),
+        content: const Text('이 책은 일시 정지된 상태입니다. 어떻게 진행할까요?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, null),
+            child: const Text('취소'),
+          ),
+          OutlinedButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('새 회차 시작'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('이어서 읽기'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Confirm dialog for "다시 읽기" when all sessions for an existing book
+  /// are completed. Returns `true` when the user confirms re-reading.
+  Future<bool?> _askReread() {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('다시 읽기'),
+        content: const Text('이미 완독한 책입니다. 새 회차로 다시 읽으시겠어요?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('다시 읽기'),
+          ),
+        ],
       ),
     );
   }

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter_gemma/flutter_gemma.dart';
 import 'llm_provider.dart';
 import 'gemma_diag.dart';
@@ -8,6 +9,28 @@ class UserCancelledException implements Exception {
   final String message = '사용자가 처리를 취소했습니다.';
   @override
   String toString() => message;
+}
+
+/// Result of analyzing a book cover image via Gemma 4 E2B vision.
+class BookVisionResult {
+  /// Recognized book title from the cover. Empty when not recognized.
+  final String title;
+
+  /// Recognized author. Empty string when the cover doesn't show one.
+  final String author;
+
+  /// Bounding box of the book cover area in normalized [0, 1] coordinates,
+  /// in the order [y1, x1, y2, x2]. Empty list when the model didn't detect
+  /// a box — in that case callers should treat the full image as the cover.
+  final List<double> bbox;
+
+  BookVisionResult({
+    required this.title,
+    this.author = '',
+    this.bbox = const [],
+  });
+
+  bool get hasBbox => bbox.length == 4;
 }
 
 /// Model entry for flutter_gemma
@@ -296,6 +319,151 @@ class GemmaProvider implements LlmProvider {
   /// Tracks the active chat session so we can cancel mid-generation.
   InferenceModelSession? _chatSession;
 
+  /// Active inference model configured for multimodal (image) input.
+  /// Lazily created on first [analyzeImage] call and kept alive for the
+  /// lifetime of the provider so we don't pay the model-load cost twice.
+  InferenceModel? _visionModel;
+
+  /// Sends [imageBytes] (JPEG/PNG bytes of a captured book cover) to the
+  /// Gemma 4 E2B model and returns recognized title, author, and the
+  /// bounding box of the book cover area.
+  ///
+  /// Returns null when the model cannot recognize a book at all. Throws on
+  /// unrecoverable engine errors. Falls back to a text-only prompt when the
+  /// active model was not loaded with [supportImage] — in that case the
+  /// bounding box will be empty and the caller should treat the whole
+  /// image as the cover.
+  Future<BookVisionResult?> analyzeImage(Uint8List imageBytes) async {
+    GemmaDiag.logSync('analyzeImage ENTER (model=${_model != null})');
+    if (!_initialized || _model == null) {
+      final msg = 'Gemma 엔진이 초기화되지 않았습니다. 모델을 먼저 선택해주세요.';
+      GemmaDiag.logSync('analyzeImage FAIL: $msg');
+      throw Exception(msg);
+    }
+
+    // Lazily create a vision-capable model handle. We don't close the
+    // original _model because it's used for text-only analysis elsewhere.
+    if (_visionModel == null) {
+      try {
+        _visionModel = await FlutterGemma.getActiveModel(
+          maxTokens: 2048,
+          preferredBackend: PreferredBackend.cpu,
+          supportImage: true,
+          maxNumImages: 1,
+        );
+        GemmaDiag.logSync('vision model created OK');
+      } catch (e) {
+        GemmaDiag.logSync('vision model creation FAILED: $e — falling back to text model');
+        _visionModel = _model;
+      }
+    }
+
+    final prompt = _buildBookCoverPrompt();
+    final session = await _visionModel!.createSession(
+      temperature: 0.1,
+      randomSeed: 42,
+      topK: 1,
+    );
+    try {
+      await session.addQueryChunk(
+        Message.withImage(text: prompt, imageBytes: imageBytes, isUser: true),
+      );
+      final response = await session.getResponse();
+      if (_cancelled) {
+        _cancelled = false;
+        throw UserCancelledException();
+      }
+      if (response.trim().isEmpty) return null;
+      return _parseBookVisionResponse(response);
+    } catch (e) {
+      if (_cancelled) {
+        _cancelled = false;
+        throw UserCancelledException();
+      }
+      GemmaDiag.logSync('analyzeImage error: $e');
+      rethrow;
+    } finally {
+      await session.close();
+    }
+  }
+
+  String _buildBookCoverPrompt() {
+    return '''
+You are a book cover recognition assistant. Look at the provided image and recognize the book. Output strictly in the following format. Do NOT include any other text.
+
+## 제목
+book title here (Korean or original as printed)
+
+## 저자
+author name here (or "알 수 없음" if not visible)
+
+## 바운딩박스
+[y1, x1, y2, x2]
+
+Where the bounding box coordinates are normalized to the range [0.0, 1.0], with (0,0) at the top-left corner and (1,1) at the bottom-right corner of the image. The box must enclose the book cover area only.
+
+If the image does not contain a recognizable book cover, output:
+
+## 제목
+알 수 없음
+
+## 저자
+알 수 없음
+
+## 바운딩박스
+[]
+''';
+  }
+
+  /// Parses the model's text response into a [BookVisionResult].
+  /// Tolerant of leading/trailing whitespace and missing sections.
+  BookVisionResult? _parseBookVisionResponse(String text) {
+    String title = '';
+    String author = '';
+    List<double> bbox = const [];
+
+    final titleMatch = RegExp(r'##\s*제목\s*\n(.+?)(?:\n##|\n$|$)',
+            caseSensitive: false, dotAll: true)
+        .firstMatch(text);
+    if (titleMatch != null) {
+      title = titleMatch.group(1)!.trim();
+      if (title.isEmpty || title.contains('알 수 없음')) return null;
+    } else {
+      return null;
+    }
+
+    final authorMatch = RegExp(r'##\s*저자\s*\n(.+?)(?:\n##|\n$|$)',
+            caseSensitive: false, dotAll: true)
+        .firstMatch(text);
+    if (authorMatch != null) {
+      author = authorMatch.group(1)!.trim();
+      if (author.contains('알 수 없음')) author = '';
+    }
+
+    final bboxMatch = RegExp(r'##\s*바운딩박스\s*\n\s*\[?([^\]]*)\]?',
+            caseSensitive: false, dotAll: true)
+        .firstMatch(text);
+    if (bboxMatch != null) {
+      final raw = bboxMatch.group(1)!.trim();
+      if (raw.isNotEmpty && raw != '[]') {
+        final nums = RegExp(r'-?\d+(?:\.\d+)?')
+            .allMatches(raw)
+            .map((m) => double.parse(m.group(0)!))
+            .toList();
+        if (nums.length == 4) {
+          // Clamp to [0, 1] range in case the model used 0–1000 scale.
+          bbox = nums.map((n) => n > 1.0 ? n / 1000.0 : n).toList();
+        }
+      }
+    }
+
+    return BookVisionResult(
+      title: title,
+      author: author,
+      bbox: bbox,
+    );
+  }
+
   @override
   Future<String> ask({
     required String prompt,
@@ -382,6 +550,10 @@ class GemmaProvider implements LlmProvider {
     GemmaDiag.logSync('_closeEngine ENTER (initialized=$_initialized)');
     await _session?.close();
     _session = null;
+    if (_visionModel != null) {
+      await _visionModel!.close();
+      _visionModel = null;
+    }
     if (_model != null) {
       await _model!.close();
       _model = null;

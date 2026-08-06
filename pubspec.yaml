@@ -48,6 +48,10 @@ dependencies:
   # Geolocation (for current location on map)
   geolocator: ^13.0.2
 
+  # Reading Tracker feature
+  camera: ^0.11.0+2
+  image: ^4.5.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

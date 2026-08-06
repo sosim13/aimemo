@@ -27,6 +27,7 @@ class CategoryChip extends StatelessWidget {
     '명언 & 좋은 글귀': Color(0xFF9E9E9E),
     '인간관계 & 경조사': Color(0xFFEF5350),
     '독서 & 리뷰': Color(0xFF26A69A),
+    '독서': Color(0xFF26A69A),
     '어학 & 외국어': Color(0xFFAB47BC),
     '시험 & 자격증': Color(0xFF5C6BC0),
     '인문 & 교양': Color(0xFF8D6E63),
@@ -85,6 +86,8 @@ class CategoryChip extends StatelessWidget {
       case '인간관계 & 경조사':
         return Icons.people;
       case '독서 & 리뷰':
+        return Icons.menu_book;
+      case '독서':
         return Icons.menu_book;
       case '어학 & 외국어':
         return Icons.translate;
