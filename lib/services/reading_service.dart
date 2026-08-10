@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:uuid/uuid.dart';
 import '../models/book.dart';
 import '../models/book_stats.dart';
@@ -63,6 +65,29 @@ class ReadingService {
   }
 
   Future<int> deleteBook(String bookId) async => _db.deleteBook(bookId);
+
+  /// Permanently deletes a book, all of its reading sessions, and the
+  /// cropped cover thumbnail file from disk. Returns the number of DB
+  /// rows affected (book row).
+  Future<int> deleteBookCompletely(String bookId) async {
+    final book = await getBookById(bookId);
+    if (book == null) return 0;
+
+    // Delete the on-disk thumbnail (ignore failures — file may already
+    // be gone if the user cleared app data).
+    if (book.coverThumbnailPath.isNotEmpty) {
+      try {
+        final file = File(book.coverThumbnailPath);
+        if (await file.exists()) await file.delete();
+      } catch (_) {
+        // Best-effort cleanup.
+      }
+    }
+
+    // Delete sessions + book row. The DB layer already cascades session
+    // deletion inside a single transaction.
+    return _db.deleteBook(bookId);
+  }
 
   Future<void> _bumpReadCount(String bookId) async {
     final book = await getBookById(bookId);

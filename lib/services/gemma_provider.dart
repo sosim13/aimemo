@@ -19,18 +19,10 @@ class BookVisionResult {
   /// Recognized author. Empty string when the cover doesn't show one.
   final String author;
 
-  /// Bounding box of the book cover area in normalized [0, 1] coordinates,
-  /// in the order [y1, x1, y2, x2]. Empty list when the model didn't detect
-  /// a box — in that case callers should treat the full image as the cover.
-  final List<double> bbox;
-
   BookVisionResult({
     required this.title,
     this.author = '',
-    this.bbox = const [],
   });
-
-  bool get hasBbox => bbox.length == 4;
 }
 
 /// Model entry for flutter_gemma
@@ -388,45 +380,57 @@ class GemmaProvider implements LlmProvider {
   }
 
   String _buildBookCoverPrompt() {
-    return '''
-You are a book cover recognition assistant. Look at the provided image and recognize the book. Output strictly in the following format. Do NOT include any other text.
+    return '''You are a precise book cover OCR assistant. The input image is already cropped to the book cover (OpenCV handled the crop).
+
+Your task: read the EXACT title and author as printed on the cover. Pay close attention to every word — do not skip or merge words. Read carefully between lines.
+
+Output strictly in the following format. Do NOT include any other text, explanation, or commentary.
 
 ## 제목
-book title here (Korean or original as printed)
+exact book title as printed (preserve capitalization, punctuation, and all words)
 
 ## 저자
-author name here (or "알 수 없음" if not visible)
+author name as printed (or "알 수 없음" if not visible)
 
-## 바운딩박스
-[y1, x1, y2, x2]
-
-Where the bounding box coordinates are normalized to the range [0.0, 1.0], with (0,0) at the top-left corner and (1,1) at the bottom-right corner of the image. The box must enclose the book cover area only.
-
-If the image does not contain a recognizable book cover, output:
+Important:
+- Read EVERY word on the cover. Do not omit prepositions, articles, or short words.
+- Preserve the original language — if the title is in English, output English; if Korean, output Korean.
+- If the cover has a subtitle separated by a colon, include it (e.g., "Title: Subtitle").
+- EXCLUDE marketing phrases that are NOT part of the actual title. Common examples to exclude:
+  "A Novel", "A Novel by", "Bestselling Author", "International Bestseller",
+  "Award-winning", "The #1 Bestseller", "Soon to be a Major Motion Picture",
+  "Now a Netflix Series", "New York Times Bestseller".
+  These are publisher marketing labels, NOT the book's title or subtitle.
+- If the image does not contain a recognizable book cover, output:
 
 ## 제목
 알 수 없음
 
 ## 저자
 알 수 없음
-
-## 바운딩박스
-[]
 ''';
   }
 
   /// Parses the model's text response into a [BookVisionResult].
-  /// Tolerant of leading/trailing whitespace and missing sections.
+  /// Tolerant of leading/trailing whitespace, missing sections,
+  /// and common model artifacts (markdown bold, quotes, etc.).
   BookVisionResult? _parseBookVisionResponse(String text) {
     String title = '';
     String author = '';
-    List<double> bbox = const [];
+
+    // Strip markdown bold/italic markers and surrounding quotes.
+    String clean(String s) {
+      return s
+          .replaceAll(RegExp(r'\*+'), '')
+          .replaceAll(RegExp(r'''['"]+|['"]+$'''), '')
+          .trim();
+    }
 
     final titleMatch = RegExp(r'##\s*제목\s*\n(.+?)(?:\n##|\n$|$)',
             caseSensitive: false, dotAll: true)
         .firstMatch(text);
     if (titleMatch != null) {
-      title = titleMatch.group(1)!.trim();
+      title = clean(titleMatch.group(1)!);
       if (title.isEmpty || title.contains('알 수 없음')) return null;
     } else {
       return null;
@@ -436,31 +440,13 @@ If the image does not contain a recognizable book cover, output:
             caseSensitive: false, dotAll: true)
         .firstMatch(text);
     if (authorMatch != null) {
-      author = authorMatch.group(1)!.trim();
+      author = clean(authorMatch.group(1)!);
       if (author.contains('알 수 없음')) author = '';
-    }
-
-    final bboxMatch = RegExp(r'##\s*바운딩박스\s*\n\s*\[?([^\]]*)\]?',
-            caseSensitive: false, dotAll: true)
-        .firstMatch(text);
-    if (bboxMatch != null) {
-      final raw = bboxMatch.group(1)!.trim();
-      if (raw.isNotEmpty && raw != '[]') {
-        final nums = RegExp(r'-?\d+(?:\.\d+)?')
-            .allMatches(raw)
-            .map((m) => double.parse(m.group(0)!))
-            .toList();
-        if (nums.length == 4) {
-          // Clamp to [0, 1] range in case the model used 0–1000 scale.
-          bbox = nums.map((n) => n > 1.0 ? n / 1000.0 : n).toList();
-        }
-      }
     }
 
     return BookVisionResult(
       title: title,
       author: author,
-      bbox: bbox,
     );
   }
 

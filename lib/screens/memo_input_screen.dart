@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -179,21 +181,21 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
   ///      - No match at all: open [ReadingTimerScreen] with the
   ///        [ScanResult] to register a brand-new book.
   Future<void> _openReadingScanner() async {
-    if (!_isAiAvailable) {
-      _showSnackBar(
-          '독서 스캔은 온디바이스 AI 모델이 필요합니다. 설정에서 모델을 선택해주세요.',
-          isError: true);
-      return;
-    }
-
     final scanResult = await Navigator.push<ScanResult>(
       context,
       MaterialPageRoute(builder: (_) => const CameraScanScreen()),
     );
     if (scanResult == null || !mounted) return;
 
+    // Show the OCR result to the user for confirmation / editing.
+    // Gemma 4 E2B's OCR can make mistakes (e.g., "Guide o the galaxy"
+    // instead of "Guide to the Galaxy"), so we let the user fix it.
+    final edited = await _showScanResultEditor(scanResult);
+    if (edited == null || !mounted) return; // cancelled
+    final confirmedScan = edited;
+
     final readingService = ReadingService();
-    final existing = await readingService.findBookByTitle(scanResult.title);
+    final existing = await readingService.findBookByTitle(confirmedScan.title);
 
     Book? book;
     bool forceNewRound = false;
@@ -235,12 +237,96 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
       MaterialPageRoute(
         builder: (_) => ReadingTimerScreen(
           existingBook: book,
-          scanResult: book == null ? scanResult : null,
+          scanResult: book == null ? confirmedScan : null,
           forceNewRound: forceNewRound,
         ),
       ),
     );
     // No setState needed — we navigated to a self-contained flow.
+  }
+
+  /// Shows a dialog with the OCR-recognized title and author, allowing
+  /// the user to confirm or edit before proceeding to the reading timer.
+  /// Returns null when cancelled, or a [ScanResult] with the (possibly
+  /// edited) title and author. The thumbnail path is preserved.
+  Future<ScanResult?> _showScanResultEditor(ScanResult scan) {
+    final titleCtrl = TextEditingController(text: scan.title);
+    final authorCtrl = TextEditingController(text: scan.author);
+
+    return showDialog<ScanResult>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('책 정보 확인'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Thumbnail preview
+            if (scan.thumbnailPath.isNotEmpty) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.file(
+                  File(scan.thumbnailPath),
+                  width: 120,
+                  height: 160,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => const SizedBox(
+                    width: 120,
+                    height: 160,
+                    child: Icon(Icons.book, size: 48),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+            Text(
+              '스캔된 정보가 정확한지 확인해주세요.',
+              style: TextStyle(
+                color: Colors.grey[600],
+                fontSize: 13,
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: titleCtrl,
+              decoration: const InputDecoration(
+                labelText: '제목',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.book),
+              ),
+              textCapitalization: TextCapitalization.words,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: authorCtrl,
+              decoration: const InputDecoration(
+                labelText: '저자',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.person),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, null),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(
+              context,
+              ScanResult(
+                title: titleCtrl.text.trim(),
+                author: authorCtrl.text.trim(),
+                thumbnailPath: scan.thumbnailPath,
+              ),
+            ),
+            child: const Text('확인'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// Quick dialog: "이어서 읽기" (resume) vs "새 회차 시작" (re-read) for a

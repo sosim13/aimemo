@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
+import 'package:provider/provider.dart';
+import '../services/auth_service.dart';
 import '../services/gemma_diag.dart';
 import '../services/llm_service.dart';
 import '../services/debug_logger.dart';
@@ -78,6 +80,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // --- Account / Login Section ---
+          _buildAccountCard(),
+          const SizedBox(height: 16),
+
           // --- AI Model Provider (Gemma only) ---
           Card(
             shape:
@@ -292,6 +298,173 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ],
     );
+  }
+
+  // --- Account / Login Card ---
+
+  Widget _buildAccountCard() {
+    final auth = context.watch<AuthService>();
+
+    return Card(
+      shape:
+          RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.account_circle,
+                    color: Theme.of(context).colorScheme.primary),
+                const SizedBox(width: 8),
+                Text(
+                  '계정',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (auth.isLoggedIn) ...[
+              // 로그인된 상태
+              Row(
+                children: [
+                  const Icon(Icons.check_circle, color: Colors.green, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          auth.displayName,
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                        if (auth.email != null)
+                          Text(
+                            auth.email!,
+                            style: TextStyle(
+                              color: Colors.grey[600],
+                              fontSize: 13,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                onPressed: _signOut,
+                icon: const Icon(Icons.logout, size: 18),
+                label: const Text('로그아웃'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.red,
+                ),
+              ),
+            ] else ...[
+              // 비로그인(게스트) 상태
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, color: Colors.blue, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '로그인 없이 사용 중 — 모든 기능을 그대로 이용할 수 있습니다.\n'
+                        '구글 로그인 시 나중에 기기 간 동기화가 가능합니다.',
+                        style: TextStyle(
+                          color: Colors.blue[700],
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: auth.isSigningIn ? null : _signInWithGoogle,
+                  icon: auth.isSigningIn
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.login, size: 18),
+                  label: Text(auth.isSigningIn ? '로그인 중...' : '구글로 로그인'),
+                ),
+              ),
+            ],
+            if (_message != null && !auth.isLoggedIn) ...[
+              const SizedBox(height: 12),
+              Text(
+                _message!,
+                style: TextStyle(
+                  color: _message!.contains('❌') ? Colors.red : Colors.green,
+                  fontSize: 13,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _signInWithGoogle() async {
+    final auth = context.read<AuthService>();
+    try {
+      await auth.signInWithGoogle();
+      // OAuth redirect 후 onAuthStateChange → _user 업데이트 → 자동 UI 갱신
+    } catch (e) {
+      setState(() => _message = '❌ 로그인 실패: $e');
+    }
+  }
+
+  Future<void> _signOut() async {
+    final auth = context.read<AuthService>();
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('로그아웃'),
+        content: const Text('로그아웃하시겠습니까?\n\n로그인 없이도 계속 사용할 수 있습니다.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('로그아웃'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    try {
+      await auth.signOut();
+      if (mounted) {
+        setState(() => _message = '로그아웃되었습니다.');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _message = '❌ 로그아웃 실패: $e');
+      }
+    }
   }
 
   Future<void> _showDiagLog() async {

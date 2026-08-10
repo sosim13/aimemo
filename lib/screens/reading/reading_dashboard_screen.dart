@@ -159,13 +159,30 @@ class _BookCardState extends State<_BookCard> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      widget.book.title,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            widget.book.title,
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleMedium
+                                ?.copyWith(fontWeight: FontWeight.w700),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
+                        ),
+                        IconButton(
+                          icon: Icon(Icons.delete_outline,
+                              size: 20, color: Colors.grey[400]),
+                          onPressed: _onDelete,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          splashRadius: 16,
+                          tooltip: '삭제',
+                        ),
+                      ],
                     ),
                     if (widget.book.author.isNotEmpty) ...[
                       const SizedBox(height: 4),
@@ -261,6 +278,33 @@ class _BookCardState extends State<_BookCard> {
       _loadSessions();
     } else if (shouldResume) {
       // User backed out without resuming — no-op.
+    }
+  }
+
+  Future<void> _onDelete() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('독서 기록 삭제'),
+        content: Text(
+            '"${widget.book.title}"의 모든 독서 기록과 썸네일이 삭제됩니다.\n이 작업은 되돌릴 수 없습니다.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await _readingService.deleteBookCompletely(widget.book.bookId);
+      widget.onChanged();
     }
   }
 

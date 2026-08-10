@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import '../models/book.dart';
 import '../models/memo.dart';
+import '../models/reading_session.dart';
 import '../services/database_service.dart';
 import '../services/llm_service.dart';
 import '../services/native_share_service.dart';
@@ -13,7 +16,10 @@ import '../widgets/empty_state.dart';
 import '../widgets/category_chip.dart';
 import 'memo_input_screen.dart';
 import 'memo_detail_screen.dart';
+import 'reading/camera_scan_screen.dart';
 import 'reading/reading_dashboard_screen.dart';
+import 'reading/reading_timer_screen.dart';
+import '../services/book_vision_service.dart';
 
 
 class HomeScreen extends StatefulWidget {
@@ -230,6 +236,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             onPressed: () => _toggleSearch(),
           ),
           IconButton(
+            icon: const Icon(Icons.menu_book_outlined),
+            tooltip: '독서 기록 시작',
+            onPressed: _openReadingScanner,
+          ),
+          IconButton(
             icon: const Icon(Icons.add_circle_outline),
             tooltip: '메모 추가',
             onPressed: () => _openMemoInput(),
@@ -391,6 +402,167 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (result == true && mounted) {
       await _loadMemos();
     }
+  }
+
+  /// Reading Tracker entry point — opens the camera, scans the cover,
+  /// matches against existing books, then jumps into the timer screen.
+  Future<void> _openReadingScanner() async {
+    final scanResult = await Navigator.push<ScanResult>(
+      context,
+      MaterialPageRoute(builder: (_) => const CameraScanScreen()),
+    );
+    if (scanResult == null || !mounted) return;
+
+    final edited = await _showScanResultEditor(scanResult);
+    if (edited == null || !mounted) return;
+    final confirmedScan = edited;
+
+    final readingService = ReadingService();
+    final existing = await readingService.findBookByTitle(confirmedScan.title);
+
+    Book? book;
+    bool forceNewRound = false;
+
+    if (existing != null) {
+      final active =
+          await readingService.getActiveSessionForBook(existing.bookId);
+      if (active != null) {
+        book = existing;
+        if (active.status == ReadingSessionStatus.paused) {
+          final decision = await _askResumeOrReread();
+          if (decision == null) return;
+          forceNewRound = !decision;
+        }
+      } else {
+        final decision = await _askReread();
+        if (decision != true) return;
+        book = existing;
+        forceNewRound = true;
+      }
+    }
+
+    if (!mounted) return;
+    await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ReadingTimerScreen(
+          existingBook: book,
+          scanResult: book == null ? confirmedScan : null,
+          forceNewRound: forceNewRound,
+        ),
+      ),
+    );
+    if (mounted) await _loadMemos();
+  }
+
+  Future<ScanResult?> _showScanResultEditor(ScanResult scan) {
+    final titleCtrl = TextEditingController(text: scan.title);
+    final authorCtrl = TextEditingController(text: scan.author);
+
+    return showDialog<ScanResult>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('책 정보 확인'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (scan.thumbnailPath.isNotEmpty) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.file(
+                  File(scan.thumbnailPath),
+                  width: 120, height: 160, fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => const SizedBox(
+                    width: 120, height: 160,
+                    child: Icon(Icons.book, size: 48),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+            Text('스캔된 정보가 정확한지 확인해주세요.',
+              style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: titleCtrl,
+              decoration: const InputDecoration(
+                labelText: '제목', border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.book),
+              ),
+              textCapitalization: TextCapitalization.words,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: authorCtrl,
+              decoration: const InputDecoration(
+                labelText: '저자', border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.person),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, null),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, ScanResult(
+              title: titleCtrl.text.trim(),
+              author: authorCtrl.text.trim(),
+              thumbnailPath: scan.thumbnailPath,
+            )),
+            child: const Text('확인'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<bool?> _askResumeOrReread() {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('이어서 읽기'),
+        content: const Text('이 책은 일시 정지된 상태입니다. 어떻게 진행할까요?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, null),
+            child: const Text('취소'),
+          ),
+          OutlinedButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('새 회차 시작'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('이어서 읽기'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<bool?> _askReread() {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('다시 읽기'),
+        content: const Text('이미 완독한 책입니다. 새 회차로 다시 읽으시겠어요?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('다시 읽기'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _toggleSearch() {

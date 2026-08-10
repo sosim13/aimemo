@@ -40,6 +40,15 @@
                 <data android:scheme="http"/>
                 <data android:scheme="https"/>
             </intent-filter>
+
+            <!-- Supabase OAuth redirect URI -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="io.supabase.flutter"/>
+                <data android:host="login-callback"/>
+            </intent-filter>
         </activity>
 
         <activity

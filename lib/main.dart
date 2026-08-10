@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
 import 'package:flutter_gemma_litertlm/flutter_gemma_litertlm.dart';
+import 'package:provider/provider.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'models/queue_state.dart';
+import 'services/auth_service.dart';
+import 'services/supabase_config.dart';
 import 'services/database_service.dart';
 import 'services/llm_service.dart';
 import 'services/debug_logger.dart';
@@ -23,6 +27,13 @@ void main() async {
 
   // Initialize debug logger
   await DebugLogger().init();
+
+  // Initialize Supabase (auth + cloud sync)
+  await Supabase.initialize(
+    url: SupabaseConfig.supabaseUrl,
+    publishableKey: SupabaseConfig.supabaseAnonKey,
+  );
+  AuthService().init();
 
   // Initialize flutter_gemma for on-device LLM inference
   // Register LiteRT-LM engine for .litertlm model support
@@ -240,7 +251,9 @@ class AimemoApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
+    return ChangeNotifierProvider(
+      create: (_) => AuthService(),
+      child: MaterialApp(
       title: 'Aimemo',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
@@ -329,6 +342,7 @@ class AimemoApp extends StatelessWidget {
             );
         }
       },
+      ),
     );
   }
 }

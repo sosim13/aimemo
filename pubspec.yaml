@@ -45,12 +45,16 @@ dependencies:
   # Naver Map (for address location display)
   flutter_naver_map: ^1.4.4
 
+  # Supabase (auth + cloud sync)
+  supabase_flutter: ^2.8.0
+
   # Geolocation (for current location on map)
   geolocator: ^13.0.2
 
   # Reading Tracker feature
   camera: ^0.11.0+2
-  image: ^4.5.3
+  opencv_dart: ^1.4.5
+  google_mlkit_text_recognition: ^0.16.0
 
 dev_dependencies:
   flutter_test:
