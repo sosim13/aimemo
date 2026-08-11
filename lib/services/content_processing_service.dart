@@ -16,6 +16,7 @@ import 'web_page_service.dart';
 import 'category_detector.dart';
 import 'geocoding_service.dart';
 import 'naver_coord_service.dart';
+import 'sync_service.dart';
 import 'debug_logger.dart';
 
 // Native queue type to ContentType mapping
@@ -81,6 +82,8 @@ class ContentProcessingService {
   final _aiService = AiService();
   final _llmService = LlmService();
   final _databaseService = DatabaseService();
+  final _syncService = SyncService();
+
   final _debug = DebugLogger();
 
   /// Stream that fires each time an item finishes processing.
@@ -1003,7 +1006,10 @@ class ContentProcessingService {
       sourceUrl: url,
     );
     final id = await _databaseService.insertMemo(memo);
-    await _tryGeocode(memo.copyWith(id: id));
+    final saved = memo.copyWith(id: id);
+    await _tryGeocode(saved);
+    // Supabase 동기화 (비로그인 시 no-op)
+    _syncService.debouncePushMemo(saved);
     return url;
   }
 
@@ -1016,7 +1022,10 @@ class ContentProcessingService {
   /// before the caller continues (important for background isolate).
   Future<int> _insertMemo(Memo memo) async {
     final id = await _databaseService.insertMemo(memo);
-    await _tryGeocode(memo.copyWith(id: id));
+    final saved = memo.copyWith(id: id);
+    await _tryGeocode(saved);
+    // Supabase 동기화 (비로그인 시 no-op)
+    _syncService.debouncePushMemo(saved);
     return id;
   }
 
@@ -1027,6 +1036,8 @@ class ContentProcessingService {
     if (!memo.hasCoordinates) {
       await _tryGeocode(memo);
     }
+    // Supabase 동기화 (비로그인 시 no-op)
+    _syncService.debouncePushMemo(memo);
   }
 
   /// Regex to match Korean road address patterns (도로명 주소).

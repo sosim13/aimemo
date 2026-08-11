@@ -14,6 +14,7 @@ import '../services/database_service.dart';
 import '../services/debug_logger.dart';
 import '../services/category_detector.dart';
 import '../services/content_processing_service.dart';
+import '../services/sync_service.dart';
 import '../models/memo.dart';
 import 'memo_input_screen.dart';
 
@@ -34,6 +35,7 @@ class _UrlProcessingScreenState extends State<UrlProcessingScreen> {
   final _aiService = AiService();
   final _llmService = LlmService();
   final _databaseService = DatabaseService();
+  final _syncService = SyncService();
   final _debug = DebugLogger();
 
   /// Direct file fallback logger — bypasses DebugLogger entirely.
@@ -181,6 +183,7 @@ class _UrlProcessingScreenState extends State<UrlProcessingScreen> {
       );
 
       await _databaseService.insertMemo(memo);
+      _syncService.debouncePushMemo(memo);
       await _debug.log('UP: YouTube memo saved with AI result');
     } catch (e) {
       // AI 분석 실패 시 기본 정보라도 저장
@@ -194,6 +197,7 @@ class _UrlProcessingScreenState extends State<UrlProcessingScreen> {
         youtubeVideoId: parsed.youtubeVideoId,
       );
       await _databaseService.insertMemo(memo);
+      _syncService.debouncePushMemo(memo);
     }
 
     if (mounted) {
@@ -243,6 +247,7 @@ class _UrlProcessingScreenState extends State<UrlProcessingScreen> {
       );
 
       await _databaseService.insertMemo(memo);
+      _syncService.debouncePushMemo(memo);
     } catch (e) {
       // AI 실패 시 기본 정보라도 저장
       String? fallbackAddress;
@@ -267,6 +272,7 @@ class _UrlProcessingScreenState extends State<UrlProcessingScreen> {
         sourceUrl: tiktokInfo.videoUrl,
       );
       await _databaseService.insertMemo(memo);
+      _syncService.debouncePushMemo(memo);
     }
 
     if (mounted) {
@@ -442,6 +448,7 @@ ${pageInfo.textContent}''';
         sourceUrl: widget.sharedUrl,
       );
       await _databaseService.insertMemo(memo);
+      _syncService.debouncePushMemo(memo);
       await _debug.log('UP: Memo saved successfully');
     } catch (e) {
       await _debug.log(
@@ -460,6 +467,7 @@ ${pageInfo.textContent}''';
         sourceUrl: widget.sharedUrl,
       );
       await _databaseService.insertMemo(memo);
+      _syncService.debouncePushMemo(memo);
       await _debug.log('UP: Fallback memo saved (category=$detected)');
     }
 

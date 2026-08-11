@@ -11,6 +11,7 @@ import '../services/content_processing_service.dart';
 import '../services/background_queue_service.dart';
 import '../services/reading_service.dart';
 import '../services/shared_content_parser.dart';
+import '../services/sync_service.dart';
 import '../widgets/memo_card.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/category_chip.dart';
@@ -30,6 +31,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _databaseService = DatabaseService();
+  final _syncService = SyncService();
   final _llmService = LlmService();
   final _processingService = ContentProcessingService();
   final _backgroundQueue = BackgroundQueueService();
@@ -88,6 +90,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       _checkSharedContent();
       _loadMemos();  // 백그라운드에서 처리된 메모 반영
+      // Supabase에서 메모 pull (비로그인 시 no-op)
+      _syncService.pullFromSupabase().catchError((e) {
+        debugPrint('[Home] pullFromSupabase 오류: $e');
+      });
+      _syncService.processSyncQueue().catchError((e) {
+        debugPrint('[Home] processSyncQueue 오류: $e');
+      });
     }
   }
 
@@ -202,7 +211,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
 
     if (confirm == true) {
-      await _databaseService.deleteMemo(memo.id!);
+      // 소프트 삭제 — SyncService가 원격에도 반영 (비로그인 시 no-op).
+      await _databaseService.softDeleteMemo(memo.id!);
+      _syncService.pushMemoDelete(memo.memoId).catchError((e) {
+        debugPrint('[Home] pushMemoDelete 오류: $e');
+      });
       await _loadMemos();
     }
   }

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/book.dart';
+import '../models/memo.dart';
 import 'database_service.dart';
 import 'thumbnail_sync_service.dart';
 
@@ -34,6 +35,9 @@ class SyncService {
 
   /// debouncing용 타이머 맵 (bookId → Timer)
   final Map<String, Timer> _debounceTimers = {};
+
+  /// 메모용 debouncing 타이머 맵 (memoId → Timer)
+  final Map<String, Timer> _memoDebounceTimers = {};
 
   /// 동기화 가능 여부: 현재 사용자가 Supabase Auth 세션을 가지고 있고
   /// provider가 google인지 확인. 비로그인/익명이면 false.
@@ -135,6 +139,102 @@ class SyncService {
   }
 
   // ---------------------------------------------------------------------------
+  // Push (로컬 → 원격) — 메모
+  // ---------------------------------------------------------------------------
+
+  /// 단일 메모를 Supabase에 upsert.
+  /// createdAt/updatedAt은 마지막 로컬 값 유지. soft delete는 deletedAt으로 표현.
+  Future<void> pushMemo(Memo memo) async {
+    if (!_canSync) {
+      debugPrint('[SyncService] 동기화 불가 (비로그인/익명) — pushMemo 생략: ${memo.memoId}');
+      return;
+    }
+    if (memo.memoId.isEmpty) {
+      debugPrint('[SyncService] pushMemo — memoId 없음, skip');
+      return;
+    }
+
+    final uid = _currentUserId!;
+    try {
+      final data = {
+        'memo_id': memo.memoId,
+        'user_id': uid,
+        'title': memo.title,
+        'content': memo.content,
+        'category': memo.category,
+        'source_url': memo.sourceUrl,
+        'youtube_video_id': memo.youtubeVideoId,
+        'thumbnail_url': memo.thumbnailUrl,
+        'image_path': memo.imagePath,
+        'address': memo.address,
+        'search_keyword': memo.searchKeyword,
+        'kakao_lat': memo.kakaoLat,
+        'kakao_lng': memo.kakaoLng,
+        'naver_x': memo.naverX,
+        'naver_y': memo.naverY,
+        'created_at': memo.createdAt.toUtc().toIso8601String(),
+        'updated_at': memo.updatedAt.toUtc().toIso8601String(),
+        'deleted_at': memo.deletedAt?.toUtc().toIso8601String(),
+      };
+
+      await _client.from('memos').upsert(data, onConflict: 'memo_id');
+      debugPrint('[SyncService] pushMemo 성공: ${memo.memoId}');
+    } catch (e) {
+      debugPrint('[SyncService] pushMemo 실패, 큐에 저장: ${memo.memoId} — $e');
+      await _db.insertSyncQueue(
+        memo.memoId,
+        'upsert',
+        entityType: 'memo',
+        entityId: memo.memoId,
+      );
+    }
+  }
+
+  /// 메모 삭제를 Supabase에 반영 (soft delete).
+  Future<void> pushMemoDelete(String memoId) async {
+    if (!_canSync) {
+      debugPrint('[SyncService] 동기화 불가 — pushMemoDelete 생략: $memoId');
+      return;
+    }
+    if (memoId.isEmpty) return;
+
+    final uid = _currentUserId!;
+    try {
+      final now = DateTime.now().toUtc().toIso8601String();
+      await _client.from('memos').update({
+        'deleted_at': now,
+        'updated_at': now,
+      }).eq('memo_id', memoId).eq('user_id', uid);
+      debugPrint('[SyncService] pushMemoDelete 성공: $memoId');
+    } catch (e) {
+      debugPrint('[SyncService] pushMemoDelete 실패, 큐에 저장: $memoId — $e');
+      await _db.insertSyncQueue(
+        memoId,
+        'delete',
+        entityType: 'memo',
+        entityId: memoId,
+      );
+    }
+  }
+
+  /// 1초 debounce 후 pushMemo 호출.
+  void debouncePushMemo(Memo memo) {
+    if (!_canSync) return;
+    if (memo.memoId.isEmpty) return;
+
+    final existing = _memoDebounceTimers[memo.memoId];
+    existing?.cancel();
+
+    _memoDebounceTimers[memo.memoId] = Timer(const Duration(seconds: 1), () {
+      _memoDebounceTimers.remove(memo.memoId);
+      pushMemo(memo).catchError((e) {
+        debugPrint('[SyncService] debouncePushMemo 오류: ${memo.memoId} — $e');
+      });
+    });
+    debugPrint('[SyncService] debouncePushMemo 예약: ${memo.memoId}');
+  }
+
+  // ---------------------------------------------------------------------------
   // Pull (원격 → 로컬)
   // ---------------------------------------------------------------------------
 
@@ -157,6 +257,29 @@ class SyncService {
       return List<Map<String, dynamic>>.from(response);
     } catch (e) {
       debugPrint('[SyncService] pull 실패: $e');
+      return [];
+    }
+  }
+
+  /// 원격에서 현재 사용자의 메모 목록을 조회.
+  /// deleted_at이 null인 활성 메모만 가져옴.
+  Future<List<Map<String, dynamic>>> pullMemos() async {
+    if (!_canSync) {
+      debugPrint('[SyncService] 동기화 불가 — pullMemos 생략');
+      return [];
+    }
+
+    final uid = _currentUserId!;
+    try {
+      final response = await _client
+          .from('memos')
+          .select()
+          .eq('user_id', uid)
+          .filter('deleted_at', 'is', null);
+      debugPrint('[SyncService] pullMemos 조회: ${response.length}건');
+      return List<Map<String, dynamic>>.from(response);
+    } catch (e) {
+      debugPrint('[SyncService] pullMemos 실패: $e');
       return [];
     }
   }
@@ -215,7 +338,85 @@ class SyncService {
       }
     }
 
-    debugPrint('[SyncService] pullFromSupabase 완료');
+    debugPrint('[SyncService] pullFromSupabase 완료 (책)');
+
+    // --- 메모 pull ---
+    await _pullMemosFromSupabase(uid);
+    debugPrint('[SyncService] pullFromSupabase 완료 (메모)');
+  }
+
+  /// Supabase에서 메모를 풀 + 충돌 해결 + 로컬 DB 업데이트.
+  Future<void> _pullMemosFromSupabase(String uid) async {
+    final remoteMemos = await pullMemos();
+    if (remoteMemos.isEmpty) {
+      debugPrint('[SyncService] 원격에 메모 없음 — pull 종료');
+      return;
+    }
+
+    for (final remoteRow in remoteMemos) {
+      final remoteMemoId = remoteRow['memo_id'] as String?;
+      if (remoteMemoId == null || remoteMemoId.isEmpty) continue;
+
+      final remoteUpdatedAtStr = remoteRow['updated_at'] as String?;
+      final remoteUpdatedAt = remoteUpdatedAtStr != null
+          ? DateTime.tryParse(remoteUpdatedAtStr)?.toLocal()
+          : null;
+
+      final localMemo = await _db.getMemoByMemoId(remoteMemoId);
+
+      if (localMemo == null) {
+        // 로컬에 없는 remote 메모 → 로컬에 추가
+        await _upsertLocalMemoFromRemote(remoteRow, uid);
+        debugPrint('[SyncService] 로컬에 메모 추가: $remoteMemoId');
+      } else {
+        // 충돌 해결: updated_at 비교
+        final localUpdatedAt = localMemo.updatedAt;
+        if (remoteUpdatedAt != null &&
+            remoteUpdatedAt.isAfter(localUpdatedAt)) {
+          // remote가 더 최신 → 로컬 덮어쓰기
+          await _upsertLocalMemoFromRemote(remoteRow, uid, existing: localMemo);
+          debugPrint('[SyncService] remote 우선 → 로컬 메모 덮어쓰기: $remoteMemoId');
+        } else {
+          // 로컬이 더 최신 → push
+          await pushMemo(localMemo);
+          debugPrint('[SyncService] 로컬 우선 → pushMemo: $remoteMemoId');
+        }
+      }
+    }
+  }
+
+  /// remote 메모 행을 로컬 DB에 upsert.
+  /// [existing]이 있으면 기존 int id를 유지 (AUTOINCREMENT PK 보존).
+  Future<void> _upsertLocalMemoFromRemote(
+    Map<String, dynamic> remoteRow,
+    String userId, {
+    Memo? existing,
+  }) async {
+    final memo = Memo(
+      id: existing?.id,
+      memoId: remoteRow['memo_id'] as String,
+      title: (remoteRow['title'] as String?) ?? '',
+      content: (remoteRow['content'] as String?) ?? '',
+      category: (remoteRow['category'] as String?) ?? '',
+      sourceUrl: _parseNullable(remoteRow['source_url']),
+      youtubeVideoId: _parseNullable(remoteRow['youtube_video_id']),
+      thumbnailUrl: _parseNullable(remoteRow['thumbnail_url']),
+      imagePath: _parseNullable(remoteRow['image_path']),
+      address: _parseNullable(remoteRow['address']),
+      searchKeyword: _parseNullable(remoteRow['search_keyword']),
+      kakaoLat: (remoteRow['kakao_lat'] as num?)?.toDouble(),
+      kakaoLng: (remoteRow['kakao_lng'] as num?)?.toDouble(),
+      naverX: (remoteRow['naver_x'] as num?)?.toDouble(),
+      naverY: (remoteRow['naver_y'] as num?)?.toDouble(),
+      createdAt: _parseDate(remoteRow['created_at'])?.toLocal() ??
+          DateTime.now(),
+      updatedAt: _parseDate(remoteRow['updated_at'])?.toLocal() ??
+          DateTime.now(),
+      userId: userId,
+      deletedAt: _parseDate(remoteRow['deleted_at'])?.toLocal(),
+    );
+
+    await _db.insertMemo(memo);
   }
 
   /// remote 행(row)을 로컬 DB에 upsert.
@@ -256,6 +457,28 @@ class SyncService {
   }
 
   // ---------------------------------------------------------------------------
+  // 전체 Push (로컬 → 원격) — 로그인 직후 로컬 백업
+  // ---------------------------------------------------------------------------
+
+  /// 로컬에 있는 모든 메모를 Supabase에 push (백업/초기 업로드).
+  /// 로그인 직후 또는 pull 전에 호출하여 로컬 데이터를 원격에 반영.
+  Future<void> pushAllLocalMemos() async {
+    if (!_canSync) return;
+
+    try {
+      final memos = await _db.getAllMemos();
+      debugPrint('[SyncService] pushAllLocalMemos: ${memos.length}건');
+      for (final memo in memos) {
+        if (memo.memoId.isEmpty) continue;
+        await pushMemo(memo);
+      }
+      debugPrint('[SyncService] pushAllLocalMemos 완료');
+    } catch (e) {
+      debugPrint('[SyncService] pushAllLocalMemos 실패: $e');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Sync Queue 재시도
   // ---------------------------------------------------------------------------
 
@@ -277,26 +500,53 @@ class SyncService {
 
     for (final item in items) {
       final id = item['id'] as int;
-      final bookId = item['bookId'] as String;
+      final bookId = item['bookId'] as String?;
       final operation = item['operation'] as String;
+      final entityType = (item['entityType'] as String?) ?? 'book';
+      final entityId = item['entityId'] as String?;
 
       try {
+        if (entityType == 'memo') {
+          // 메모 재시도
+          final memoId = entityId ?? bookId ?? '';
+          if (memoId.isEmpty) {
+            await _db.deleteSyncQueue(id);
+            continue;
+          }
+          if (operation == 'delete') {
+            await pushMemoDelete(memoId);
+          } else {
+            final memo = await _db.getMemoByMemoId(memoId);
+            if (memo != null) {
+              await pushMemo(memo);
+            }
+          }
+          await _db.deleteSyncQueue(id);
+          continue;
+        }
+
+        // 책 재시도 (기존 동작)
+        final targetBookId = entityId ?? bookId ?? '';
+        if (targetBookId.isEmpty) {
+          await _db.deleteSyncQueue(id);
+          continue;
+        }
         if (operation == 'delete') {
-          await pushDelete(bookId);
+          await pushDelete(targetBookId);
         } else {
           // upsert
-          final book = await _db.getBookById(bookId);
+          final book = await _db.getBookById(targetBookId);
           if (book != null) {
             await pushBook(book);
           } else {
             // 로컬에 없는 책의 upsert — 스킵 (이미 삭제되었을 가능성)
-            debugPrint('[SyncService] 로컬에 없는 책 — 큐 항목 삭제: $bookId');
+            debugPrint('[SyncService] 로컬에 없는 책 — 큐 항목 삭제: $targetBookId');
           }
         }
         // 성공 시 큐에서 제거
         await _db.deleteSyncQueue(id);
       } catch (e) {
-        debugPrint('[SyncService] 큐 재시도 실패: $bookId — $e');
+        debugPrint('[SyncService] 큐 재시도 실패: ${entityId ?? bookId} — $e');
         // 실패 시 큐에 유지 (다음에 재시도)
       }
     }

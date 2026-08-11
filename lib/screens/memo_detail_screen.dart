@@ -1,6 +1,7 @@
 import 'dart:io' show File;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -12,6 +13,7 @@ import '../widgets/category_chip.dart';
 import '../services/category_detector.dart';
 import '../services/geocoding_service.dart';
 import '../services/naver_coord_service.dart';
+import '../services/sync_service.dart';
 import 'memo_map_screen.dart';
 
 class MemoDetailScreen extends StatefulWidget {
@@ -25,6 +27,7 @@ class MemoDetailScreen extends StatefulWidget {
 
 class _MemoDetailScreenState extends State<MemoDetailScreen> {
   final _databaseService = DatabaseService();
+  final _syncService = SyncService();
   final _processingService = ContentProcessingService();
   Memo? _memo;
   bool _isLoading = true;
@@ -164,10 +167,15 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
           );
           await _databaseService.updateMemo(geoUpdated);
           savedMemo = geoUpdated;
+          // Supabase 동기화 (좌표 포함 최종 버전)
+          _syncService.debouncePushMemo(geoUpdated);
         }
       } catch (_) {
         // Geocoding failed silently — user can still edit the address again
       }
+    } else {
+      // 주소 변경 없음 — 일반 수정 분도 동기화
+      _syncService.debouncePushMemo(savedMemo);
     }
 
     if (mounted) {
@@ -212,7 +220,13 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     );
 
     if (confirm == true) {
-      await _databaseService.deleteMemo(widget.memoId);
+      // 소프트 삭제 — SyncService가 원격에도 반영 (비로그인 시 no-op).
+      await _databaseService.softDeleteMemo(widget.memoId);
+      if (_memo != null) {
+        _syncService.pushMemoDelete(_memo!.memoId).catchError((e) {
+          debugPrint('[MemoDetail] pushMemoDelete 오류: $e');
+        });
+      }
       if (mounted) Navigator.pop(context, true);
     }
   }

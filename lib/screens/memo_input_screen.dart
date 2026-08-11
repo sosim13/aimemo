@@ -16,6 +16,7 @@ import '../services/database_service.dart';
 import '../services/llm_service.dart';
 import '../services/reading_service.dart';
 import '../services/shared_content_parser.dart';
+import '../services/sync_service.dart';
 import '../services/tiktok_service.dart';
 import '../services/url_handler_service.dart';
 import '../services/youtube_service.dart';
@@ -39,6 +40,7 @@ class MemoInputScreen extends StatefulWidget {
 class _MemoInputScreenState extends State<MemoInputScreen> {
   final _contentController = TextEditingController();
   final _databaseService = DatabaseService();
+  final _syncService = SyncService();
   final _llmService = LlmService();
   final _urlHandler = UrlHandlerService();
   final _youtubeService = YouTubeService();
@@ -126,12 +128,16 @@ class _MemoInputScreenState extends State<MemoInputScreen> {
     final detected = CategoryDetector.detect(content);
     final category = (detected != null && detected != '기타') ? detected : '기타';
 
-    await _databaseService.insertMemo(Memo(
+    final memo = Memo(
       title: title,
       content: content,
       category: category,
       searchKeyword: ContentProcessingService.extractSearchKeyword(content),
-    ));
+    );
+    final id = await _databaseService.insertMemo(memo);
+    final saved = memo.copyWith(id: id);
+    // Supabase 동기화 (비로그인 시 no-op)
+    _syncService.debouncePushMemo(saved);
 
     if (!mounted) return;
     setState(() => _isSubmitting = false);

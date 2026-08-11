@@ -4,6 +4,7 @@ import 'category_detector.dart';
 import 'content_processing_service.dart';
 import 'database_service.dart';
 import 'llm_service.dart';
+import 'sync_service.dart';
 
 /// Result from a chat Q&A
 class ChatResult {
@@ -41,6 +42,7 @@ class ChatService {
 
   final _llmService = LlmService();
   final _databaseService = DatabaseService();
+  final _syncService = SyncService();
 
   /// Max memos to include as context in the prompt
   static const int _maxContextMemos = 5;
@@ -166,6 +168,8 @@ class ChatService {
     );
     final id = await _databaseService.insertMemo(memo);
     final savedMemo = memo.copyWith(id: id);
+    // Supabase 동기화 (비로그인 시 no-op)
+    _syncService.debouncePushMemo(savedMemo);
 
     final preview = rawContent.length > 200
         ? '${rawContent.substring(0, 200)}...'

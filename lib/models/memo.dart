@@ -1,5 +1,12 @@
+import 'package:uuid/uuid.dart';
+
 class Memo {
   final int? id;
+
+  /// 글로벌 고유 식별자 (UUID). Supabase 동기화용.
+  /// 신규 메모는 생성 시 자동 할당되며, 기존 메모는 마이그레이션 시 자동 부여.
+  final String memoId;
+
   final String title;
   final String content;
   final String category;
@@ -26,8 +33,16 @@ class Memo {
   final DateTime createdAt;
   final DateTime updatedAt;
 
+  /// 동기화용 사용자 식별자 (Supabase auth.users.id).
+  /// 비로그인 상태에서 생성된 메모는 null.
+  final String? userId;
+
+  /// 소프트 삭제 시각. null이면 활성 메모, 값이 있으면 삭제된 메모.
+  final DateTime? deletedAt;
+
   Memo({
     this.id,
+    String? memoId,
     required this.title,
     required this.content,
     required this.category,
@@ -43,8 +58,15 @@ class Memo {
     this.naverY,
     DateTime? createdAt,
     DateTime? updatedAt,
-  })  : createdAt = createdAt ?? DateTime.now(),
+    this.userId,
+    this.deletedAt,
+  })  : memoId = memoId ?? _generateMemoId(),
+        createdAt = createdAt ?? DateTime.now(),
         updatedAt = updatedAt ?? DateTime.now();
+
+  /// UUID v4 생성 — Supabase 동기화용 글로벌 고유 식별자.
+  static const _uuid = Uuid();
+  static String _generateMemoId() => _uuid.v4();
 
   /// Whether this memo has a YouTube thumbnail to show
   bool get hasThumbnail =>
@@ -68,6 +90,7 @@ class Memo {
   Map<String, dynamic> toMap() {
     return {
       if (id != null) 'id': id,
+      'memoId': memoId,
       'title': title,
       'content': content,
       'category': category,
@@ -83,12 +106,15 @@ class Memo {
       'naverY': naverY,
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
+      'userId': userId,
+      'deletedAt': deletedAt?.toIso8601String(),
     };
   }
 
   factory Memo.fromMap(Map<String, dynamic> map) {
     return Memo(
       id: map['id'] as int?,
+      memoId: (map['memoId'] as String?) ?? '',
       title: map['title'] as String,
       content: map['content'] as String,
       category: map['category'] as String,
@@ -104,11 +130,23 @@ class Memo {
       naverY: (map['naverY'] as num?)?.toDouble(),
       createdAt: DateTime.parse(map['createdAt'] as String),
       updatedAt: DateTime.parse(map['updatedAt'] as String),
+      userId: (map['userId'] as String?)?.isEmpty == false
+          ? map['userId'] as String?
+          : null,
+      deletedAt: _parseDate(map['deletedAt']),
     );
+  }
+
+  static DateTime? _parseDate(dynamic v) {
+    if (v == null) return null;
+    final s = v.toString();
+    if (s.isEmpty) return null;
+    return DateTime.tryParse(s);
   }
 
   Memo copyWith({
     int? id,
+    String? memoId,
     String? title,
     String? content,
     String? category,
@@ -124,9 +162,12 @@ class Memo {
     double? naverY,
     DateTime? createdAt,
     DateTime? updatedAt,
+    String? userId,
+    DateTime? deletedAt,
   }) {
     return Memo(
       id: id ?? this.id,
+      memoId: memoId ?? this.memoId,
       title: title ?? this.title,
       content: content ?? this.content,
       category: category ?? this.category,
@@ -142,12 +183,15 @@ class Memo {
       naverY: naverY ?? this.naverY,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      userId: userId ?? this.userId,
+      deletedAt: deletedAt ?? this.deletedAt,
     );
   }
 
   Map<String, dynamic> toJson() {
     return {
       'id': id,
+      'memoId': memoId,
       'title': title,
       'content': content,
       'category': category,
@@ -163,12 +207,15 @@ class Memo {
       'naverY': naverY,
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
+      'userId': userId,
+      'deletedAt': deletedAt?.toIso8601String(),
     };
   }
 
   factory Memo.fromJson(Map<String, dynamic> json) {
     return Memo(
       id: json['id'] as int?,
+      memoId: (json['memoId'] as String?) ?? '',
       title: json['title'] as String,
       content: json['content'] as String,
       category: json['category'] as String,
@@ -184,11 +231,15 @@ class Memo {
       naverY: (json['naverY'] as num?)?.toDouble(),
       createdAt: DateTime.parse(json['createdAt'] as String),
       updatedAt: DateTime.parse(json['updatedAt'] as String),
+      userId: (json['userId'] as String?)?.isEmpty == false
+          ? json['userId'] as String?
+          : null,
+      deletedAt: _parseDate(json['deletedAt']),
     );
   }
 
   @override
   String toString() {
-    return 'Memo(id: $id, title: $title, category: $category)';
+    return 'Memo(id: $id, memoId: $memoId, title: $title, category: $category)';
   }
 }

@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'sync_service.dart';
+
 /// Supabase 인증 서비스.
 ///
 /// - 구글 OAuth 로그인
@@ -55,6 +57,17 @@ class AuthService extends ChangeNotifier {
 
       if (event == AuthChangeEvent.signedOut) {
         _user = null;
+      } else if (event == AuthChangeEvent.signedIn ||
+          event == AuthChangeEvent.tokenRefreshed) {
+        // 로그인 성공 시 로컬 메모/책을 Supabase에 백업하고 원격 데이터를 pull.
+        // 비로그인/익명이면 SyncService 내부에서 no-op.
+        // fire-and-forget — UI 블로킹 방지.
+        SyncService().pushAllLocalMemos().catchError((e) {
+          debugPrint('[AuthService] pushAllLocalMemos 오류: $e');
+        });
+        SyncService().pullFromSupabase().catchError((e) {
+          debugPrint('[AuthService] pullFromSupabase 오류: $e');
+        });
       }
 
       _isInitializing = false;

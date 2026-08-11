@@ -16,7 +16,6 @@ import 'services/debug_logger.dart';
 import 'services/background_queue_service.dart';
 import 'services/content_processing_service.dart';
 import 'services/secure_storage_service.dart';
-import 'services/sync_service.dart';
 import 'screens/home_screen.dart';
 import 'screens/queue_screen.dart';
 import 'screens/settings_screen.dart';
@@ -187,8 +186,10 @@ Future<void> backgroundMain() async {
 
 /// Main shell with bottom navigation bar.
 /// 하단 5개 탭: 메모, 처리현황, AI 챗봇, 지도, 더보기(menu)
-/// 더보기 탭 선택 시 전체메뉴 모달 시트 표시 (독서기록, 동기화 이력, 설정 순).
-/// 향후 메뉴 추가 시 _MoreSheet에 ListTile 추가하면 됨 — 설정은 항상 맨 아래.
+/// 더보기 탭 선택 시 전체메뉴 모달 시트 표시 (독서기록, 독서달력, 동기화 이력, 설정).
+/// 모달 시트에서 메뉴 선택 시 해당 화면이 IndexedStack에 표시되며
+/// 하단 메뉴는 항상 유지됨.
+/// 향후 메뉴 추가 시 _MoreSheet에 ListTile 추가 + _screenIndex에 인덱스 매핑.
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
 
@@ -209,7 +210,7 @@ class _MainShellState extends State<MainShell> {
     cps.startPeriodicRefresh();
   }
 
-  /// 더보기 탭 인덱스 (마지막)
+  /// 하단 메뉴 탭 인덱스 — 더보기는 항상 4.
   static const _moreTabIndex = 4;
 
   void _onDestinationSelected(int index) {
@@ -220,14 +221,30 @@ class _MainShellState extends State<MainShell> {
     setState(() => _currentIndex = index);
   }
 
+  /// 더보기 모달 시트에서 메뉴 선택 시 호출.
+  /// 선택한 화면 인덱스로 전환하되, 하단 메뉴의 더보기 탭이
+  /// 선택된 상태로 표시되도록 한다.
+  void _selectMoreMenu(int screenIndex) {
+    setState(() => _currentIndex = screenIndex);
+  }
+
   void _showMoreSheet() {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (context) => const _MoreSheet(),
+      builder: (context) => _MoreSheet(
+        onSelect: _selectMoreMenu,
+      ),
     );
+  }
+
+  /// 하단 메뉴의 선택 인덱스 계산.
+  /// 0~3은 그대로, 4~7(더보기 서브 메뉴)은 모두 4(더보기)로 매핑.
+  int get _navBarIndex {
+    if (_currentIndex <= _moreTabIndex) return _currentIndex;
+    return _moreTabIndex;
   }
 
   @override
@@ -236,18 +253,20 @@ class _MainShellState extends State<MainShell> {
       body: IndexedStack(
         index: _currentIndex,
         children: const [
-          HomeScreen(),
-          QueueScreen(),
-          ChatScreen(),
-          MapScreen(),
-          // index 4는 더보기 — 실제 화면은 없고 모달 시트를 띄움.
-          SizedBox.shrink(),
+          HomeScreen(),          // 0: 메모
+          QueueScreen(),         // 1: 처리현황
+          ChatScreen(),          // 2: AI 챗봇
+          MapScreen(),           // 3: 지도
+          ReadingDashboardScreen(), // 4: 독서 기록
+          ReadingCalendarScreen(),  // 5: 독서 달력
+          SyncHistoryScreen(),       // 6: 동기화 이력
+          SettingsScreen(),         // 7: 설정
         ],
       ),
       bottomNavigationBar: SafeArea(
         top: false,
         child: NavigationBar(
-          selectedIndex: _currentIndex.clamp(0, 3),
+          selectedIndex: _navBarIndex,
           onDestinationSelected: _onDestinationSelected,
           destinations: const [
             NavigationDestination(
@@ -286,13 +305,24 @@ class _MainShellState extends State<MainShell> {
 ///
 /// 메뉴 순서 (위에서 아래):
 ///   1. 독서 기록
-///   2. 동기화 이력
-///   3. (향후 추가 메뉴는 여기에)
+///   2. 독서 달력
+///   3. 동기화 이력
+///   (향후 추가 메뉴는 여기에)
 ///   마지막: 설정  ← 항상 맨 아래
 ///
-/// 새 메뉴 추가時: `_menuItems`에 ListTile 추가. 설정은 별도로 맨 아래 고정.
+/// 새 메뉴 추가時: ListTile 추가 + onSelect 인덱스 매핑.
+/// 선택한 화면은 MainShell의 IndexedStack 내에 표시되어
+/// 하단 메뉴가 사라지지 않음.
 class _MoreSheet extends StatelessWidget {
-  const _MoreSheet();
+  const _MoreSheet({required this.onSelect});
+
+  /// 선택한 메뉴의 IndexedStack 인덱스를 MainShell에 전달.
+  final void Function(int screenIndex) onSelect;
+
+  void _select(BuildContext context, int screenIndex) {
+    Navigator.pop(context);
+    onSelect(screenIndex);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -319,48 +349,24 @@ class _MoreSheet extends StatelessWidget {
           ),
           const Divider(height: 1),
 
-          // --- 메뉴 항목들 (향후 추가 메뉴는 여기에 ListTile 추가) ---
+          // --- 메뉴 항목들 ---
           ListTile(
             leading: const Icon(Icons.menu_book_outlined),
             title: const Text('독서 기록'),
             trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const ReadingDashboardScreen(),
-                ),
-              );
-            },
+            onTap: () => _select(context, 4), // _readingIndex
           ),
           ListTile(
             leading: const Icon(Icons.calendar_month_outlined),
             title: const Text('독서 달력'),
             trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const ReadingCalendarScreen(),
-                ),
-              );
-            },
+            onTap: () => _select(context, 5), // _calendarIndex
           ),
           ListTile(
             leading: const Icon(Icons.sync_outlined),
             title: const Text('동기화 이력'),
             trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const SyncHistoryScreen(),
-                ),
-              );
-            },
+            onTap: () => _select(context, 6), // _syncIndex
           ),
 
           const Divider(height: 1),
@@ -370,15 +376,7 @@ class _MoreSheet extends StatelessWidget {
             leading: const Icon(Icons.settings_outlined),
             title: const Text('설정'),
             trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const SettingsScreen(),
-                ),
-              );
-            },
+            onTap: () => _select(context, 7), // _settingsIndex
           ),
           const SizedBox(height: 8),
         ],

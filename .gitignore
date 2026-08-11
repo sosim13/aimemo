@@ -54,3 +54,5 @@ app.*.map.json
 
 # Environment variables
 .env
+# Kotlin compiler sessions
+android/.kotlin/

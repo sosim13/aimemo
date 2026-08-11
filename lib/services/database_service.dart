@@ -24,7 +24,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 9,
+      version: 10,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -34,6 +34,7 @@ class DatabaseService {
     await db.execute('''
       CREATE TABLE memos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        memoId TEXT NOT NULL UNIQUE,
         title TEXT NOT NULL,
         content TEXT NOT NULL,
         category TEXT NOT NULL,
@@ -48,7 +49,9 @@ class DatabaseService {
         naverX REAL,
         naverY REAL,
         createdAt TEXT NOT NULL,
-        updatedAt TEXT NOT NULL
+        updatedAt TEXT NOT NULL,
+        userId TEXT,
+        deletedAt TEXT
       )
     ''');
 
@@ -58,6 +61,10 @@ class DatabaseService {
 
     await db.execute('''
       CREATE INDEX idx_memos_created_at ON memos(createdAt)
+    ''');
+
+    await db.execute('''
+      CREATE INDEX idx_memos_memoId ON memos(memoId)
     ''');
 
     await db.execute('''
@@ -123,17 +130,24 @@ class DatabaseService {
 
     // Sync queue (version 9) — 오프라인 상태에서 Supabase 동기화 실패 시
     // 재시도를 위해 쌓아두는 로컬 큐. SyncService가 처리.
+    // version 10에서 entityType/entityId 추가 (메모 동기화 지원).
     await db.execute('''
       CREATE TABLE sync_queue (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        bookId TEXT NOT NULL,
+        bookId TEXT,
         operation TEXT NOT NULL,
-        createdAt TEXT NOT NULL
+        createdAt TEXT NOT NULL,
+        entityType TEXT NOT NULL DEFAULT 'book',
+        entityId TEXT
       )
     ''');
 
     await db.execute('''
       CREATE INDEX idx_sync_queue_bookId ON sync_queue(bookId)
+    ''');
+
+    await db.execute('''
+      CREATE INDEX idx_sync_queue_entityId ON sync_queue(entityId)
     ''');
   }
 
@@ -256,19 +270,62 @@ class DatabaseService {
         CREATE INDEX IF NOT EXISTS idx_sync_queue_bookId ON sync_queue(bookId)
       ''');
     }
+    // version 10: 메모 동기화 — memos 테이블에 memoId/userId/deletedAt 컬럼 추가,
+    // 기존 메모에 고유 memoId 자동 부여, sync_queue에 entityType/entityId 컬럼 추가.
+    if (oldVersion < 10) {
+      // memos 테이블에 동기화 컬럼 추가
+      await db.execute(
+        'ALTER TABLE memos ADD COLUMN memoId TEXT',
+      );
+      await db.execute(
+        'ALTER TABLE memos ADD COLUMN userId TEXT',
+      );
+      await db.execute(
+        'ALTER TABLE memos ADD COLUMN deletedAt TEXT',
+      );
+
+      // 기존 메모에 고유 memoId 부여 (없는 것만)
+      await db.execute('''
+        UPDATE memos
+        SET memoId = 'migrated-' || id || '-' || CAST(strftime('%s','now') AS INTEGER)
+        WHERE memoId IS NULL OR memoId = ''
+      ''');
+
+      // memoId UNIQUE 인덱스 생성 (이미 중복이 없으므로 안전)
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_memos_memoId ON memos(memoId)
+      ''');
+
+      // sync_queue에 entityType/entityId 컬럼 추가 (기존 행은 'book'으로 채움)
+      await db.execute(
+        "ALTER TABLE sync_queue ADD COLUMN entityType TEXT NOT NULL DEFAULT 'book'",
+      );
+      await db.execute(
+        'ALTER TABLE sync_queue ADD COLUMN entityId TEXT',
+      );
+      // 기존 큐 항목의 entityId를 bookId로 채움
+      await db.execute('''
+        UPDATE sync_queue SET entityId = bookId WHERE entityId IS NULL
+      ''');
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_sync_queue_entityId ON sync_queue(entityId)
+      ''');
+    }
   }
 
   // CRUD Operations
 
   Future<int> insertMemo(Memo memo) async {
     final db = await database;
-    return await db.insert('memos', memo.toMap());
+    return await db.insert('memos', memo.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<List<Memo>> getAllMemos() async {
     final db = await database;
     final maps = await db.query(
       'memos',
+      where: 'deletedAt IS NULL',
       orderBy: 'createdAt DESC',
     );
     return maps.map((map) => Memo.fromMap(map)).toList();
@@ -278,7 +335,7 @@ class DatabaseService {
     final db = await database;
     final maps = await db.query(
       'memos',
-      where: 'category = ?',
+      where: 'category = ? AND deletedAt IS NULL',
       whereArgs: [category],
       orderBy: 'createdAt DESC',
     );
@@ -288,7 +345,7 @@ class DatabaseService {
   Future<List<String>> getAllCategories() async {
     final db = await database;
     final result = await db.rawQuery(
-      'SELECT DISTINCT category FROM memos ORDER BY category',
+      'SELECT DISTINCT category FROM memos WHERE deletedAt IS NULL ORDER BY category',
     );
     return result.map((row) => row['category'] as String).toList();
   }
@@ -304,6 +361,19 @@ class DatabaseService {
     return Memo.fromMap(maps.first);
   }
 
+  /// memoId(UUID)로 메모 조회 — Supabase 동기화용.
+  Future<Memo?> getMemoByMemoId(String memoId) async {
+    final db = await database;
+    final maps = await db.query(
+      'memos',
+      where: 'memoId = ?',
+      whereArgs: [memoId],
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return Memo.fromMap(maps.first);
+  }
+
   Future<int> updateMemo(Memo memo) async {
     final db = await database;
     return await db.update(
@@ -314,6 +384,7 @@ class DatabaseService {
     );
   }
 
+  /// 메모 하드 삭제 (기존 동작 유지).
   Future<int> deleteMemo(int id) async {
     final db = await database;
     return await db.delete(
@@ -323,11 +394,37 @@ class DatabaseService {
     );
   }
 
+  /// 메모 소프트 삭제 — deletedAt만 업데이트 (Supabase 동기화와 호환).
+  /// SyncService가 deletedAt이 설정된 메모를 remote에서도 soft delete.
+  Future<int> softDeleteMemo(int id) async {
+    final db = await database;
+    return await db.update(
+      'memos',
+      {
+        'deletedAt': DateTime.now().toIso8601String(),
+        'updatedAt': DateTime.now().toIso8601String(),
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// deletedAt이 null이 아닌(소프트 삭제된) 메모들의 memoId 목록 반환.
+  Future<List<String>> getSoftDeletedMemoIds() async {
+    final db = await database;
+    final maps = await db.query(
+      'memos',
+      columns: ['memoId'],
+      where: 'deletedAt IS NOT NULL',
+    );
+    return maps.map((m) => m['memoId'] as String).toList();
+  }
+
   Future<List<Memo>> getMemosWithCoordinates() async {
     final db = await database;
     final maps = await db.query(
       'memos',
-      where: 'kakaoLat IS NOT NULL AND kakaoLng IS NOT NULL',
+      where: 'kakaoLat IS NOT NULL AND kakaoLng IS NOT NULL AND deletedAt IS NULL',
       orderBy: 'createdAt DESC',
     );
     return maps.map((map) => Memo.fromMap(map)).toList();
@@ -337,7 +434,7 @@ class DatabaseService {
     final db = await database;
     final maps = await db.query(
       'memos',
-      where: 'title LIKE ? OR content LIKE ? OR category LIKE ?',
+      where: '(title LIKE ? OR content LIKE ? OR category LIKE ?) AND deletedAt IS NULL',
       whereArgs: ['%$query%', '%$query%', '%$query%'],
       orderBy: 'createdAt DESC',
     );
@@ -347,7 +444,7 @@ class DatabaseService {
   Future<Map<String, int>> getMemoCountByCategory() async {
     final db = await database;
     final result = await db.rawQuery(
-      'SELECT category, COUNT(*) as count FROM memos GROUP BY category ORDER BY count DESC',
+      'SELECT category, COUNT(*) as count FROM memos WHERE deletedAt IS NULL GROUP BY category ORDER BY count DESC',
     );
     final map = <String, int>{};
     for (final row in result) {
@@ -391,7 +488,7 @@ class DatabaseService {
     final maps = await db.query(
       'memos',
       columns: ['id'],
-      where: 'title = ?',
+      where: "title = ? AND deletedAt IS NULL",
       whereArgs: [title],
       orderBy: 'createdAt DESC',
       limit: 1,
@@ -526,12 +623,21 @@ class DatabaseService {
   // ---------------------------------------------------------------------------
 
   /// 동기화 큐에 항목 추가 (Supabase push 실패 시 호출).
-  Future<int> insertSyncQueue(String bookId, String operation) async {
+  /// [entityType]은 'book' 또는 'memo'. 지정 안 하면 'book'으로 간주.
+  /// [entityId]는 해당 엔티티의 식별자(bookId 또는 memoId).
+  Future<int> insertSyncQueue(
+    String bookId,
+    String operation, {
+    String entityType = 'book',
+    String? entityId,
+  }) async {
     final db = await database;
     return await db.insert('sync_queue', {
       'bookId': bookId,
       'operation': operation,
       'createdAt': DateTime.now().toIso8601String(),
+      'entityType': entityType,
+      'entityId': entityId ?? bookId,
     });
   }
 
