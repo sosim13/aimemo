@@ -17,7 +17,6 @@ import '../widgets/category_chip.dart';
 import 'memo_input_screen.dart';
 import 'memo_detail_screen.dart';
 import 'reading/camera_scan_screen.dart';
-import 'reading/reading_dashboard_screen.dart';
 import 'reading/reading_timer_screen.dart';
 import '../services/book_vision_service.dart';
 
@@ -132,13 +131,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     try {
       final memos = await _databaseService.getAllMemos();
       final categoryCounts = await _databaseService.getMemoCountByCategory();
-      // Reading Tracker: books are kept in a separate table. Inject a
-      // "독서" chip when there's at least one registered book so the user
-      // can reach the dashboard from the category filter bar.
-      final books = await ReadingService().getAllBooks();
-      if (books.isNotEmpty) {
-        categoryCounts['독서'] = books.length;
-      }
+      // 독서 기록은 이제 전체메뉴(더보기)에서 접근 — 카테고리 chip에서 제거.
+      // books가 '독서' 카테고리에 노출되지 않도록 주입하지 않음.
       if (mounted) {
         setState(() {
           _memos = memos;
@@ -364,13 +358,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         label: Text(label),
         selected: isSelected,
         onSelected: (selected) {
-          // Reading Tracker: tapping the '독서' chip opens the dashboard
-          // instead of filtering the main memo list inline — books are
-          // stored in their own table, not the memos table.
-          if (selected && category == '독서') {
-            _openReadingDashboard();
-            return;
-          }
           setState(() => _selectedCategory = selected ? category : null);
         },
         selectedColor: color.withValues(alpha: 0.2),
@@ -383,15 +370,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         visualDensity: VisualDensity.compact,
       ),
     );
-  }
-
-  Future<void> _openReadingDashboard() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const ReadingDashboardScreen()),
-    );
-    // Books live in a separate table from memos, so the main memo list
-    // doesn't need to reload here.
   }
 
   Future<void> _openMemoInput() async {

@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
 import 'package:flutter_gemma_litertlm/flutter_gemma_litertlm.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'models/queue_state.dart';
@@ -12,6 +16,7 @@ import 'services/debug_logger.dart';
 import 'services/background_queue_service.dart';
 import 'services/content_processing_service.dart';
 import 'services/secure_storage_service.dart';
+import 'services/sync_service.dart';
 import 'screens/home_screen.dart';
 import 'screens/queue_screen.dart';
 import 'screens/settings_screen.dart';
@@ -21,6 +26,9 @@ import 'screens/memo_detail_screen.dart';
 import 'screens/memo_map_screen.dart';
 import 'screens/url_processing_screen.dart';
 import 'screens/chat_screen.dart';
+import 'screens/reading/reading_dashboard_screen.dart';
+import 'screens/reading/reading_calendar_screen.dart';
+import 'screens/sync_history_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,7 +36,13 @@ void main() async {
   // Initialize debug logger
   await DebugLogger().init();
 
-  // Initialize Supabase (auth + cloud sync)
+  // 한국어 달력 locale 초기화
+  await initializeDateFormatting('ko_KR', null);
+
+  // .env 파일 로드 — Supabase.initialize 전에 반드시 실행되어야 함
+  await dotenv.load(fileName: '.env');
+
+  // Initialize Supabase (auth + cloud sync) — dotenv에서 URL/key 읽기
   await Supabase.initialize(
     url: SupabaseConfig.supabaseUrl,
     publishableKey: SupabaseConfig.supabaseAnonKey,
@@ -172,7 +186,9 @@ Future<void> backgroundMain() async {
 }
 
 /// Main shell with bottom navigation bar.
-/// Five tabs: 메모 (Home), 처리현황 (Queue), AI 챗봇 (Chat), 지도 (Map), 설정 (Settings)
+/// 하단 5개 탭: 메모, 처리현황, AI 챗봇, 지도, 더보기(menu)
+/// 더보기 탭 선택 시 전체메뉴 모달 시트 표시 (독서기록, 동기화 이력, 설정 순).
+/// 향후 메뉴 추가 시 _MoreSheet에 ListTile 추가하면 됨 — 설정은 항상 맨 아래.
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
 
@@ -193,6 +209,27 @@ class _MainShellState extends State<MainShell> {
     cps.startPeriodicRefresh();
   }
 
+  /// 더보기 탭 인덱스 (마지막)
+  static const _moreTabIndex = 4;
+
+  void _onDestinationSelected(int index) {
+    if (index == _moreTabIndex) {
+      _showMoreSheet();
+      return;
+    }
+    setState(() => _currentIndex = index);
+  }
+
+  void _showMoreSheet() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) => const _MoreSheet(),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -203,16 +240,15 @@ class _MainShellState extends State<MainShell> {
           QueueScreen(),
           ChatScreen(),
           MapScreen(),
-          SettingsScreen(),
+          // index 4는 더보기 — 실제 화면은 없고 모달 시트를 띄움.
+          SizedBox.shrink(),
         ],
       ),
       bottomNavigationBar: SafeArea(
         top: false,
         child: NavigationBar(
-          selectedIndex: _currentIndex,
-          onDestinationSelected: (index) {
-            setState(() => _currentIndex = index);
-          },
+          selectedIndex: _currentIndex.clamp(0, 3),
+          onDestinationSelected: _onDestinationSelected,
           destinations: const [
             NavigationDestination(
               icon: Icon(Icons.home_outlined),
@@ -235,12 +271,117 @@ class _MainShellState extends State<MainShell> {
               label: '지도',
             ),
             NavigationDestination(
-              icon: Icon(Icons.settings_outlined),
-              selectedIcon: Icon(Icons.settings),
-              label: '설정',
+              icon: Icon(Icons.menu_outlined),
+              selectedIcon: Icon(Icons.menu),
+              label: '더보기',
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 전체메뉴 모달 시트.
+///
+/// 메뉴 순서 (위에서 아래):
+///   1. 독서 기록
+///   2. 동기화 이력
+///   3. (향후 추가 메뉴는 여기에)
+///   마지막: 설정  ← 항상 맨 아래
+///
+/// 새 메뉴 추가時: `_menuItems`에 ListTile 추가. 설정은 별도로 맨 아래 고정.
+class _MoreSheet extends StatelessWidget {
+  const _MoreSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 핸들 바
+          Container(
+            margin: const EdgeInsets.only(top: 8, bottom: 4),
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.grey[300],
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 12),
+            child: Text(
+              '전체 메뉴',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+          ),
+          const Divider(height: 1),
+
+          // --- 메뉴 항목들 (향후 추가 메뉴는 여기에 ListTile 추가) ---
+          ListTile(
+            leading: const Icon(Icons.menu_book_outlined),
+            title: const Text('독서 기록'),
+            trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+            onTap: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const ReadingDashboardScreen(),
+                ),
+              );
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.calendar_month_outlined),
+            title: const Text('독서 달력'),
+            trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+            onTap: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const ReadingCalendarScreen(),
+                ),
+              );
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.sync_outlined),
+            title: const Text('동기화 이력'),
+            trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+            onTap: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const SyncHistoryScreen(),
+                ),
+              );
+            },
+          ),
+
+          const Divider(height: 1),
+
+          // --- 설정 (항상 맨 아래) ---
+          ListTile(
+            leading: const Icon(Icons.settings_outlined),
+            title: const Text('설정'),
+            trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+            onTap: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const SettingsScreen(),
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 8),
+        ],
       ),
     );
   }

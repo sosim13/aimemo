@@ -51,3 +51,6 @@ app.*.map.json
 *.apk
 *.aab
 **/outputs/apk/
+
+# Environment variables
+.env

@@ -24,7 +24,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 8,
+      version: 9,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -80,14 +80,19 @@ class DatabaseService {
     ''');
 
     // Reading Tracker tables (added in version 8).
+    // version 9에서 동기화용 컬럼(thumbnailUrl, userId, updatedAt, deletedAt) 추가됨.
     await db.execute('''
       CREATE TABLE books (
         bookId TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         author TEXT NOT NULL DEFAULT '',
-        coverThumbnailPath TEXT NOT NULL,
+        coverThumbnailPath TEXT NOT NULL DEFAULT '',
         category TEXT NOT NULL DEFAULT '독서',
-        totalReadCount INTEGER NOT NULL DEFAULT 0
+        totalReadCount INTEGER NOT NULL DEFAULT 0,
+        thumbnailUrl TEXT,
+        userId TEXT,
+        updatedAt TEXT,
+        deletedAt TEXT
       )
     ''');
 
@@ -114,6 +119,21 @@ class DatabaseService {
 
     await db.execute('''
       CREATE INDEX idx_sessions_status ON reading_sessions(status)
+    ''');
+
+    // Sync queue (version 9) — 오프라인 상태에서 Supabase 동기화 실패 시
+    // 재시도를 위해 쌓아두는 로컬 큐. SyncService가 처리.
+    await db.execute('''
+      CREATE TABLE sync_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bookId TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        createdAt TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX idx_sync_queue_bookId ON sync_queue(bookId)
     ''');
   }
 
@@ -205,6 +225,35 @@ class DatabaseService {
       ''');
       await db.execute('''
         CREATE INDEX IF NOT EXISTS idx_sessions_status ON reading_sessions(status)
+      ''');
+    }
+    // version 9: 동기화용 컬럼 + sync_queue 테이블 추가
+    if (oldVersion < 9) {
+      // books 테이블에 동기화 관련 컬럼 추가 (ALTER TABLE)
+      await db.execute(
+        'ALTER TABLE books ADD COLUMN thumbnailUrl TEXT',
+      );
+      await db.execute(
+        'ALTER TABLE books ADD COLUMN userId TEXT',
+      );
+      await db.execute(
+        'ALTER TABLE books ADD COLUMN updatedAt TEXT',
+      );
+      await db.execute(
+        'ALTER TABLE books ADD COLUMN deletedAt TEXT',
+      );
+
+      // sync_queue 테이블 생성 — 오프라인 동기화 재시도 큐
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS sync_queue (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          bookId TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          createdAt TEXT NOT NULL
+        )
+      ''');
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_sync_queue_bookId ON sync_queue(bookId)
       ''');
     }
   }
@@ -370,8 +419,14 @@ class DatabaseService {
 
   Future<List<Book>> getAllBooks() async {
     final db = await database;
-    final maps =
-        await db.query('books', orderBy: 'totalReadCount DESC, title ASC');
+    // 최근에 읽은(수정된) 책이 상단에 오도록 updatedAt DESC로 정렬.
+    // SQLite는 NULLS LAST를 지원하지 않으므로 CASE 식으로 대체.
+    // updatedAt이 null인 구형 데이터는 맨 아래로.
+    final maps = await db.query(
+      'books',
+      orderBy:
+          'CASE WHEN updatedAt IS NULL THEN 1 ELSE 0 END, updatedAt DESC, title ASC',
+    );
     return maps.map((m) => Book.fromMap(m)).toList();
   }
 
@@ -404,6 +459,29 @@ class DatabaseService {
     await db.delete('reading_sessions',
         where: 'bookId = ?', whereArgs: [bookId]);
     return await db.delete('books', where: 'bookId = ?', whereArgs: [bookId]);
+  }
+
+  /// 소프트 삭제 — deletedAt 컬럼만 업데이트 (Supabase 동기화와 호환).
+  /// SyncService가 deletedAt이 설정된 책을 remote에서도 soft delete 함.
+  Future<int> softDeleteBook(String bookId) async {
+    final db = await database;
+    return await db.update(
+      'books',
+      {'deletedAt': DateTime.now().toIso8601String()},
+      where: 'bookId = ?',
+      whereArgs: [bookId],
+    );
+  }
+
+  /// deletedAt이 null이 아닌(소프트 삭제된) 책들의 bookId 목록.
+  Future<List<String>> getSoftDeletedBookIds() async {
+    final db = await database;
+    final maps = await db.query(
+      'books',
+      columns: ['bookId'],
+      where: 'deletedAt IS NOT NULL',
+    );
+    return maps.map((m) => m['bookId'] as String).toList();
   }
 
   // ---------------------------------------------------------------------------
@@ -441,6 +519,38 @@ class DatabaseService {
     final db = await database;
     return await db.delete('reading_sessions',
         where: 'sessionId = ?', whereArgs: [sessionId]);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sync Queue CRUD (version 9) — SyncService가 사용
+  // ---------------------------------------------------------------------------
+
+  /// 동기화 큐에 항목 추가 (Supabase push 실패 시 호출).
+  Future<int> insertSyncQueue(String bookId, String operation) async {
+    final db = await database;
+    return await db.insert('sync_queue', {
+      'bookId': bookId,
+      'operation': operation,
+      'createdAt': DateTime.now().toIso8601String(),
+    });
+  }
+
+  /// 동기화 큐의 모든 대기 항목 조회.
+  Future<List<Map<String, dynamic>>> getAllSyncQueue() async {
+    final db = await database;
+    return await db.query('sync_queue', orderBy: 'createdAt ASC');
+  }
+
+  /// 동기화 큐에서 단일 항목 삭제.
+  Future<int> deleteSyncQueue(int id) async {
+    final db = await database;
+    return await db.delete('sync_queue', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 동기화 큐 비우기.
+  Future<void> clearSyncQueue() async {
+    final db = await database;
+    await db.delete('sync_queue');
   }
 
   Future<void> close() async {

@@ -5,6 +5,7 @@ import '../models/book.dart';
 import '../models/book_stats.dart';
 import '../models/reading_session.dart';
 import 'database_service.dart';
+import 'sync_service.dart';
 
 /// Business logic for the Reading Tracker feature.
 ///
@@ -12,6 +13,9 @@ import 'database_service.dart';
 /// plus the statistics computation backing the Reading Dashboard.
 /// The in-flight timer lives in the UI layer (ReadingTimerScreen), which
 /// periodically calls [addActiveTime] to persist accumulated seconds.
+///
+/// 동기화: 로컬 DB에 먼저 저장한 뒤 SyncService.debouncePush()로 1초 debounce 후
+/// Supabase에 push 시도. 비로그인 상태면 SyncService 내부에서 no-op 처리됨.
 class ReadingService {
   static final ReadingService _instance = ReadingService._internal();
   factory ReadingService() => _instance;
@@ -19,6 +23,7 @@ class ReadingService {
 
   final _db = DatabaseService();
   final _uuid = const Uuid();
+  final _sync = SyncService();
 
   // ---------------------------------------------------------------------------
   // Books
@@ -30,13 +35,17 @@ class ReadingService {
     required String coverThumbnailPath,
   }) async {
     final bookId = _uuid.v4();
+    final now = DateTime.now();
     final book = Book(
       bookId: bookId,
       title: title,
       author: author,
       coverThumbnailPath: coverThumbnailPath,
+      updatedAt: now,
     );
     await _db.insertBook(book);
+    // 동기화 — 비로그인 상태면 debouncePush 내부에서 no-op
+    _sync.debouncePush(book);
     return bookId;
   }
 
@@ -64,7 +73,15 @@ class ReadingService {
     return match;
   }
 
-  Future<int> deleteBook(String bookId) async => _db.deleteBook(bookId);
+  Future<int> deleteBook(String bookId) async {
+    final result = _db.deleteBook(bookId);
+    // 동기화 — 원격에서도 삭제 (soft delete push)
+    _sync.pushDelete(bookId).catchError((e) {
+      // ignore: avoid_print
+      print('[ReadingService] deleteBook sync 오류: $e');
+    });
+    return result;
+  }
 
   /// Permanently deletes a book, all of its reading sessions, and the
   /// cropped cover thumbnail file from disk. Returns the number of DB
@@ -86,15 +103,27 @@ class ReadingService {
 
     // Delete sessions + book row. The DB layer already cascades session
     // deletion inside a single transaction.
-    return _db.deleteBook(bookId);
+    final result = await _db.deleteBook(bookId);
+
+    // 동기화 — 원격에서도 삭제 (soft delete push)
+    _sync.pushDelete(bookId).catchError((e) {
+      // ignore: avoid_print
+      print('[ReadingService] deleteBookCompletely sync 오류: $e');
+    });
+
+    return result;
   }
 
   Future<void> _bumpReadCount(String bookId) async {
     final book = await getBookById(bookId);
     if (book == null) return;
-    await _db.updateBook(
-      book.copyWith(totalReadCount: book.totalReadCount + 1),
+    final updated = book.copyWith(
+      totalReadCount: book.totalReadCount + 1,
+      updatedAt: DateTime.now(),
     );
+    await _db.updateBook(updated);
+    // 동기화 — totalReadCount 변경 시 push (간접 updateBook 동기화)
+    _sync.debouncePush(updated);
   }
 
   // ---------------------------------------------------------------------------
@@ -214,6 +243,41 @@ class ReadingService {
 
   Future<int> deleteSession(String sessionId) async =>
       _db.deleteReadingSession(sessionId);
+
+  // ---------------------------------------------------------------------------
+  // Calendar — 날짜별 세션 조회
+  // ---------------------------------------------------------------------------
+
+  /// 특정 날짜(연-월-일)에 독서 활동이 있은 모든 세션을 반환.
+  /// firstStartDate가 해당 날짜인 세션 또는 completedDate가 해당 날짜인 세션.
+  /// [date]는 시간 부분이 0으로 정규화되어야 함.
+  Future<List<ReadingSession>> getSessionsForDate(DateTime date) async {
+    final allBooks = await getAllBooks();
+    final dateStr = _dateOnly(date);
+    final sessions = <ReadingSession>[];
+    for (final book in allBooks) {
+      final bookSessions = await getSessionsForBook(book.bookId);
+      for (final s in bookSessions) {
+        // firstStartDate 또는 completedDate가 해당 날짜인 세션
+        if (_dateOnly(s.firstStartDate) == dateStr) {
+          sessions.add(s);
+        } else if (s.completedDate != null &&
+            _dateOnly(s.completedDate!) == dateStr) {
+          sessions.add(s);
+        }
+      }
+    }
+    // 최신순 정렬
+    sessions.sort((a, b) => b.firstStartDate.compareTo(a.firstStartDate));
+    return sessions;
+  }
+
+  /// YYYY-MM-DD 형식 문자열로 변환.
+  static String _dateOnly(DateTime dt) {
+    return '${dt.year.toString().padLeft(4, '0')}'
+        '-${dt.month.toString().padLeft(2, '0')}'
+        '-${dt.day.toString().padLeft(2, '0')}';
+  }
 
   // ---------------------------------------------------------------------------
   // Statistics
