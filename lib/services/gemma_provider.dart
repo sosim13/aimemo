@@ -130,8 +130,11 @@ class GemmaProvider implements LlmProvider {
   }
 
   @override
-  Future<void> downloadModel(String modelName,
-      {Function(double progress)? onProgress}) async {
+  Future<void> downloadModel(
+    String modelName, {
+    Function(double progress)? onProgress,
+    CancelToken? cancelToken,
+  }) async {
     final info = _kGemmaModels.firstWhere((m) => m.id == modelName);
     GemmaDiag.logSync('downloadModel ENTER: $modelName (${info.fileName})');
 
@@ -140,7 +143,10 @@ class GemmaProvider implements LlmProvider {
         modelType: info.modelType,
         fileType: ModelFileType.litertlm,
       )
-          .fromNetwork(info.url)
+          // foreground: true — Android 포그라운드 서비스로 항상 실행.
+          // 홈버튼/화면 이탈 시에도 다운로드가 중단되지 않는다.
+          .fromNetwork(info.url, foreground: true)
+          .withCancelToken(cancelToken ?? CancelToken())
           .withProgress((int percent) {
             onProgress?.call(percent / 100.0);
           })
@@ -186,7 +192,8 @@ class GemmaProvider implements LlmProvider {
           modelType: info.modelType,
           fileType: ModelFileType.litertlm,
         )
-            .fromNetwork(info.url)
+            // foreground: true — 자동 다운로드 경로도 포그라운드 서비스 사용
+            .fromNetwork(info.url, foreground: true)
             .install();
         GemmaDiag.logSync('Install OK after network download');
       } catch (e) {

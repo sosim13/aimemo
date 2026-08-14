@@ -1,3 +1,4 @@
+import 'package:flutter_gemma/flutter_gemma.dart' show CancelToken;
 import '../models/memo.dart';
 import 'category_detector.dart';
 
@@ -88,7 +89,12 @@ abstract class LlmProvider {
   Future<List<ModelStatus>> getModels();
 
   /// Download/pull a model
-  Future<void> downloadModel(String modelName, {Function(double progress)? onProgress});
+  /// [cancelToken] — 취소 토큰. [CancelToken.cancel] 호출 시 다운로드가 중단된다.
+  Future<void> downloadModel(
+    String modelName, {
+    Function(double progress)? onProgress,
+    CancelToken? cancelToken,
+  });
 
   /// Delete a model
   Future<void> deleteModel(String modelName);

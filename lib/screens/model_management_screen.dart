@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_gemma/flutter_gemma.dart' show DownloadCancelledException;
 import '../services/llm_service.dart';
 import '../services/llm_provider.dart';
+import '../services/model_download_manager.dart';
 
 class ModelManagementScreen extends StatefulWidget {
   const ModelManagementScreen({super.key});
@@ -11,16 +13,30 @@ class ModelManagementScreen extends StatefulWidget {
 
 class _ModelManagementScreenState extends State<ModelManagementScreen> {
   final _llmService = LlmService();
+  final _downloadManager = ModelDownloadManager.instance;
   List<ModelStatus> _downloadedModels = [];
-  Map<String, double> _downloadProgress = {};
-  Set<String> _downloadingModels = {};
   bool _isLoading = true;
   String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
+    // 다운로드 상태는 전역 매니저가 보관 — 화면 이탈/재진입 시에도
+    // 진행 상황이 유지되도록 매니저의 변경 알림을 구독한다.
+    _downloadManager.downloading.addListener(_onDownloadStateChanged);
+    _downloadManager.progress.addListener(_onDownloadStateChanged);
     _loadModels();
+  }
+
+  @override
+  void dispose() {
+    _downloadManager.downloading.removeListener(_onDownloadStateChanged);
+    _downloadManager.progress.removeListener(_onDownloadStateChanged);
+    super.dispose();
+  }
+
+  void _onDownloadStateChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _loadModels() async {
@@ -56,30 +72,19 @@ class _ModelManagementScreenState extends State<ModelManagementScreen> {
   }
 
   Future<void> _pullModel(LlmModelInfo info) async {
-    if (_downloadingModels.contains(info.name)) return;
-
-    setState(() {
-      _downloadingModels = {..._downloadingModels, info.name};
-      _downloadProgress[info.name] = 0.0;
-    });
+    if (_downloadManager.isDownloading(info.name)) return;
 
     try {
-      await _llmService.currentProvider.downloadModel(
-        info.name,
-        onProgress: (progress) {
-          if (mounted) {
-            setState(() {
-              _downloadProgress[info.name] = progress;
-            });
-          }
-        },
-      );
+      // 전역 매니저가 다운로드를 실행 — 위젯 dispose와 무관하게 계속 진행.
+      // 화면을 나가도 다운로드가 유지되고, 재진입 시 매니저 상태로 복원된다.
+      await _downloadManager.download(info);
       // Refresh model list after download
-      await _loadModels();
-      // Auto-select the downloaded model
-      await _llmService.selectModel(info.name);
+      if (mounted) await _loadModels();
+      // Auto-select the downloaded model (manager가 완료 후 선택까지 처리)
       if (mounted) setState(() {});
     } catch (e) {
+      // 사용자가 직접 취소한 경우는 오류 스낵바 대신 조용히 처리한다.
+      if (e is DownloadCancelledException) return;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -88,13 +93,18 @@ class _ModelManagementScreenState extends State<ModelManagementScreen> {
           ),
         );
       }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _downloadingModels = _downloadingModels.difference({info.name});
-          _downloadProgress.remove(info.name);
-        });
-      }
+    }
+  }
+
+  void _cancelDownload(LlmModelInfo info) {
+    _downloadManager.cancel(info.name);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('다운로드를 취소했습니다.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
     }
   }
 
@@ -400,8 +410,9 @@ class _ModelManagementScreenState extends State<ModelManagementScreen> {
 
   Widget _buildAvailableModelCard(LlmModelInfo info) {
     final isDownloaded = _isModelDownloaded(info.name);
-    final isDownloading = _downloadingModels.contains(info.name);
-    final progress = _downloadProgress[info.name] ?? 0.0;
+    // 전역 매니저에서 진행 상태를 읽는다 — 화면 재진입 시에도 유지됨
+    final isDownloading = _downloadManager.isDownloading(info.name);
+    final progress = _downloadManager.progressOf(info.name);
 
     if (isDownloaded) return const SizedBox.shrink();
 
@@ -457,10 +468,22 @@ class _ModelManagementScreenState extends State<ModelManagementScreen> {
                   ),
                 ),
                 if (isDownloading)
-                  const SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        onPressed: () => _cancelDownload(info),
+                        icon: Icon(Icons.close, color: Colors.red[400]),
+                        tooltip: '다운로드 취소',
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ],
                   )
                 else
                   IconButton(
