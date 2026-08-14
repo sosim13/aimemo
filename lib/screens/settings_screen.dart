@@ -108,7 +108,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'flutter_gemma 엔진으로 Gemma 4 E2B/Qwen3 등을 기기에서 직접 실행합니다.\n'
+                    'flutter_gemma 엔진으로 Gemma 4 E2B/E4B 등을 기기에서 직접 실행합니다.\n'
                     '"모델 관리"에서 모델을 다운로드 후 사용하세요.',
                     style: TextStyle(
                       color: Colors.grey[600],
@@ -140,8 +140,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    '권장 모델: Gemma 4 E2B (2.4GB) 또는 Qwen3 0.6B (586MB)\n'
-                    '저메모리 기기(S23 등)에서는 Qwen3 0.6B를 권장합니다.',
+                    '권장 모델: Gemma 4 E2B (2.4GB)\n'
+                    '저메모리 기기(S23 등)에서는 Gemma 4 E2B를 권장합니다.',
                     style: TextStyle(
                       color: Colors.grey[500],
                       fontSize: 12,

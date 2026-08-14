@@ -67,28 +67,19 @@ const _kGemmaModels = <_GemmaModel>[
     fileName: 'gemma-4-E4B-it.litertlm',
   ),
   _GemmaModel(
-    id: 'qwen3-06b',
-    displayName: 'Qwen3 0.6B',
-    sizeLabel: '~586MB',
-    description: '초경량, 저메모리, S23에 최적',
-    modelType: ModelType.qwen3,
-    url: 'https://huggingface.co/litert-community/Qwen3-0.6B/resolve/main/Qwen3-0.6B.litertlm',
-    fileName: 'Qwen3-0.6B.litertlm',
-  ),
-  _GemmaModel(
-    id: 'smollm-135m',
-    displayName: 'SmolLM 135M',
-    sizeLabel: '~167MB',
-    description: '초초경량, 기본 텍스트 생성 (품질 낮음)',
-    modelType: ModelType.general,
-    url: 'https://huggingface.co/litert-community/SmolLM-135M-Instruct/resolve/main/SmolLM-135M-Instruct_multi-prefill-seq_q8_ekv1280.task',
-    fileName: 'SmolLM-135M-Instruct_multi-prefill-seq_q8_ekv1280.task',
+    id: 'gemma4-e4b-qat',
+    displayName: 'Gemma 4 E4B Mobile (QAT)',
+    sizeLabel: '~3.0GB',
+    description: 'QAT 양자화로 모바일 최적화된 고성능 Gemma 4',
+    modelType: ModelType.gemma4,
+    url: 'https://huggingface.co/DarrenJiaImbue/gemma-4-E4B-it-qat-litertlm/resolve/main/gemma-4-E4B-it-qat.litertlm',
+    fileName: 'gemma-4-E4B-it-qat.litertlm',
   ),
 ];
 
 /// On-device LLM provider using flutter_gemma (LiteRT-LM backend).
 ///
-/// Supports Gemma 4 E2B/E4B, Qwen3 0.6B, and SmolLM models
+/// Supports Gemma 4 E2B/E4B and Gemma 4 E4B Mobile (QAT) models
 /// via flutter_gemma's managed native bridge.
 class GemmaProvider implements LlmProvider {
   InferenceModel? _model;
