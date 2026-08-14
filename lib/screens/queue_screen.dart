@@ -4,6 +4,7 @@ import '../models/queue_state.dart';
 import '../services/background_queue_service.dart';
 import '../services/content_processing_service.dart';
 import '../services/database_service.dart';
+import '../services/sync_service.dart';
 import 'memo_detail_screen.dart';
 
 class QueueScreen extends StatefulWidget {
@@ -16,6 +17,7 @@ class QueueScreen extends StatefulWidget {
 class _QueueScreenState extends State<QueueScreen> {
   final _processingService = ContentProcessingService();
   final _databaseService = DatabaseService();
+  final _syncService = SyncService();
   QueueState _queueState = const QueueState(
     items: [],
     isProcessing: false,
@@ -60,6 +62,13 @@ class _QueueScreenState extends State<QueueScreen> {
     );
 
     if (confirm == true) {
+      // 원격(처리 이력)도 함께 삭제 — 로컬 삭제 전에 itemId 수집 후 soft delete push
+      final historyItems = await _databaseService.getAllProcessingHistory();
+      for (final item in historyItems) {
+        _syncService.pushProcessingHistoryDelete(item.itemId).catchError((e) {
+          debugPrint('[QueueScreen] 처리 이력 삭제 sync 오류: ${item.itemId} — $e');
+        });
+      }
       await _databaseService.clearAllProcessingHistory();
       // DB 기록만 지우면 2초 폴링이 native pending을 다시 읽어와서
       // UI에 계속 표시되므로 native 큐도 함께 비운다.

@@ -5,6 +5,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/book.dart';
 import '../models/memo.dart';
+import '../models/queue_state.dart';
+import '../models/reading_session.dart';
 import 'database_service.dart';
 import 'thumbnail_sync_service.dart';
 
@@ -63,6 +65,12 @@ class SyncService {
 
   /// 메모용 debouncing 타이머 맵 (memoId → Timer)
   final Map<String, Timer> _memoDebounceTimers = {};
+
+  /// 독서 세션용 debouncing 타이머 맵 (sessionId → Timer)
+  final Map<String, Timer> _sessionDebounceTimers = {};
+
+  /// 처리 이력용 debouncing 타이머 맵 (itemId → Timer)
+  final Map<String, Timer> _historyDebounceTimers = {};
 
   /// 동기화 가능 여부: 현재 사용자가 Supabase Auth 세션을 가지고 있고
   /// provider가 google인지 확인. 비로그인/익명이면 false.
@@ -281,6 +289,198 @@ class SyncService {
   }
 
   // ---------------------------------------------------------------------------
+  // Push (로컬 → 원격) — 독서 세션 (reading_sessions)
+  // ---------------------------------------------------------------------------
+
+  /// 단일 독서 세션을 Supabase에 upsert.
+  /// createdAt/updatedAt은 마지막 로컬 값 유지. soft delete는 deletedAt으로 표현.
+  Future<void> pushReadingSession(ReadingSession session) async {
+    if (!_canSync) {
+      debugPrint(
+        '[SyncService] 동기화 불가 (비로그인/익명) — pushReadingSession 생략: ${session.sessionId}',
+      );
+      return;
+    }
+    if (session.sessionId.isEmpty) {
+      debugPrint('[SyncService] pushReadingSession — sessionId 없음, skip');
+      return;
+    }
+
+    final uid = _currentUserId!;
+    try {
+      final now = DateTime.now().toUtc().toIso8601String();
+      final data = {
+        'session_id': session.sessionId,
+        'user_id': uid,
+        'book_id': session.bookId,
+        'read_round': session.readRound,
+        'first_start_date': session.firstStartDate.toUtc().toIso8601String(),
+        'completed_date': session.completedDate?.toUtc().toIso8601String(),
+        'accumulated_active_time': session.accumulatedActiveTime,
+        'status': session.status.label,
+        'updated_at': session.updatedAt?.toUtc().toIso8601String() ?? now,
+        'deleted_at': session.deletedAt?.toUtc().toIso8601String(),
+      };
+
+      await _clientOrNull!.from('reading_sessions').upsert(data, onConflict: 'session_id');
+      debugPrint('[SyncService] pushReadingSession 성공: ${session.sessionId}');
+    } catch (e) {
+      debugPrint('[SyncService] pushReadingSession 실패, 큐에 저장: ${session.sessionId} — $e');
+      await _db.insertSyncQueue(
+        session.sessionId,
+        'upsert',
+        entityType: 'reading_session',
+        entityId: session.sessionId,
+      );
+    }
+  }
+
+  /// 독서 세션 삭제를 Supabase에 반영 (soft delete).
+  Future<void> pushReadingSessionDelete(String sessionId) async {
+    if (!_canSync) {
+      debugPrint('[SyncService] 동기화 불가 — pushReadingSessionDelete 생략: $sessionId');
+      return;
+    }
+    if (sessionId.isEmpty) return;
+
+    final uid = _currentUserId!;
+    try {
+      final now = DateTime.now().toUtc().toIso8601String();
+      await _clientOrNull!
+          .from('reading_sessions')
+          .update({'deleted_at': now, 'updated_at': now})
+          .eq('session_id', sessionId)
+          .eq('user_id', uid);
+      debugPrint('[SyncService] pushReadingSessionDelete 성공: $sessionId');
+    } catch (e) {
+      debugPrint('[SyncService] pushReadingSessionDelete 실패, 큐에 저장: $sessionId — $e');
+      await _db.insertSyncQueue(
+        sessionId,
+        'delete',
+        entityType: 'reading_session',
+        entityId: sessionId,
+      );
+    }
+  }
+
+  /// 1초 debounce 후 pushReadingSession 호출.
+  /// 타이머 화면이 매초 addActiveTime을 호출해 세션을 업데이트하므로
+  /// 과도한 API 호출 방지를 위해 debounce 필수.
+  void debouncePushReadingSession(ReadingSession session) {
+    if (!_canSync) return;
+    if (session.sessionId.isEmpty) return;
+
+    final existing = _sessionDebounceTimers[session.sessionId];
+    existing?.cancel();
+
+    _sessionDebounceTimers[session.sessionId] = Timer(const Duration(seconds: 1), () {
+      _sessionDebounceTimers.remove(session.sessionId);
+      pushReadingSession(session).catchError((e) {
+        debugPrint('[SyncService] debouncePushReadingSession 오류: ${session.sessionId} — $e');
+      });
+    });
+    debugPrint('[SyncService] debouncePushReadingSession 예약: ${session.sessionId}');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Push (로컬 → 원격) — 처리 이력 (processing_history)
+  // ---------------------------------------------------------------------------
+
+  /// 단일 처리 이력을 Supabase에 upsert.
+  Future<void> pushProcessingHistory(ProcessingHistoryItem item) async {
+    if (!_canSync) {
+      debugPrint(
+        '[SyncService] 동기화 불가 (비로그인/익명) — pushProcessingHistory 생략: ${item.itemId}',
+      );
+      return;
+    }
+    if (item.itemId.isEmpty) {
+      debugPrint('[SyncService] pushProcessingHistory — itemId 없음, skip');
+      return;
+    }
+
+    final uid = _currentUserId!;
+    try {
+      final now = DateTime.now().toUtc().toIso8601String();
+      final data = {
+        'item_id': item.itemId,
+        'user_id': uid,
+        'content': item.content,
+        'type': switch (item.type) {
+          ContentType.url => 'url',
+          ContentType.text => 'text',
+          ContentType.image => 'image',
+        },
+        'status': item.status,
+        'progress': item.progress,
+        'error': item.error,
+        'memo_title': item.memoTitle,
+        'memo_id': item.memoId,
+        'created_at': item.createdAt.toUtc().toIso8601String(),
+        'completed_at': item.completedAt?.toUtc().toIso8601String(),
+        'updated_at': item.updatedAt?.toUtc().toIso8601String() ?? now,
+        'deleted_at': item.deletedAt?.toUtc().toIso8601String(),
+      };
+
+      await _clientOrNull!.from('processing_history').upsert(data, onConflict: 'item_id');
+      debugPrint('[SyncService] pushProcessingHistory 성공: ${item.itemId}');
+    } catch (e) {
+      debugPrint('[SyncService] pushProcessingHistory 실패, 큐에 저장: ${item.itemId} — $e');
+      await _db.insertSyncQueue(
+        item.itemId,
+        'upsert',
+        entityType: 'processing_history',
+        entityId: item.itemId,
+      );
+    }
+  }
+
+  /// 처리 이력 삭제를 Supabase에 반영 (soft delete).
+  Future<void> pushProcessingHistoryDelete(String itemId) async {
+    if (!_canSync) {
+      debugPrint('[SyncService] 동기화 불가 — pushProcessingHistoryDelete 생략: $itemId');
+      return;
+    }
+    if (itemId.isEmpty) return;
+
+    final uid = _currentUserId!;
+    try {
+      final now = DateTime.now().toUtc().toIso8601String();
+      await _clientOrNull!
+          .from('processing_history')
+          .update({'deleted_at': now, 'updated_at': now})
+          .eq('item_id', itemId)
+          .eq('user_id', uid);
+      debugPrint('[SyncService] pushProcessingHistoryDelete 성공: $itemId');
+    } catch (e) {
+      debugPrint('[SyncService] pushProcessingHistoryDelete 실패, 큐에 저장: $itemId — $e');
+      await _db.insertSyncQueue(
+        itemId,
+        'delete',
+        entityType: 'processing_history',
+        entityId: itemId,
+      );
+    }
+  }
+
+  /// 1초 debounce 후 pushProcessingHistory 호출.
+  void debouncePushProcessingHistory(ProcessingHistoryItem item) {
+    if (!_canSync) return;
+    if (item.itemId.isEmpty) return;
+
+    final existing = _historyDebounceTimers[item.itemId];
+    existing?.cancel();
+
+    _historyDebounceTimers[item.itemId] = Timer(const Duration(seconds: 1), () {
+      _historyDebounceTimers.remove(item.itemId);
+      pushProcessingHistory(item).catchError((e) {
+        debugPrint('[SyncService] debouncePushProcessingHistory 오류: ${item.itemId} — $e');
+      });
+    });
+    debugPrint('[SyncService] debouncePushProcessingHistory 예약: ${item.itemId}');
+  }
+
+  // ---------------------------------------------------------------------------
   // Pull (원격 → 로컬)
   // ---------------------------------------------------------------------------
 
@@ -330,6 +530,52 @@ class SyncService {
     }
   }
 
+  /// 원격에서 현재 사용자의 독서 세션 목록을 조회.
+  /// deleted_at이 null인 활성 세션만 가져옴.
+  Future<List<Map<String, dynamic>>> pullReadingSessions() async {
+    if (!_canSync) {
+      debugPrint('[SyncService] 동기화 불가 — pullReadingSessions 생략');
+      return [];
+    }
+
+    final uid = _currentUserId!;
+    try {
+      final response = await _clientOrNull!
+          .from('reading_sessions')
+          .select()
+          .eq('user_id', uid)
+          .filter('deleted_at', 'is', null);
+      debugPrint('[SyncService] pullReadingSessions 조회: ${response.length}건');
+      return List<Map<String, dynamic>>.from(response);
+    } catch (e) {
+      debugPrint('[SyncService] pullReadingSessions 실패: $e');
+      return [];
+    }
+  }
+
+  /// 원격에서 현재 사용자의 처리 이력 목록을 조회.
+  /// deleted_at이 null인 활성 이력만 가져옴.
+  Future<List<Map<String, dynamic>>> pullProcessingHistory() async {
+    if (!_canSync) {
+      debugPrint('[SyncService] 동기화 불가 — pullProcessingHistory 생략');
+      return [];
+    }
+
+    final uid = _currentUserId!;
+    try {
+      final response = await _clientOrNull!
+          .from('processing_history')
+          .select()
+          .eq('user_id', uid)
+          .filter('deleted_at', 'is', null);
+      debugPrint('[SyncService] pullProcessingHistory 조회: ${response.length}건');
+      return List<Map<String, dynamic>>.from(response);
+    } catch (e) {
+      debugPrint('[SyncService] pullProcessingHistory 실패: $e');
+      return [];
+    }
+  }
+
   /// Supabase에서 풀 + 충돌 해결 + 로컬 DB 업데이트.
   ///
   /// 충돌 해결: updated_at 기반 last-write-wins.
@@ -350,16 +596,14 @@ class SyncService {
     //  동일한 내용 + 동일한 updated_at이 유지되어 로컬이 보존된다.)
     await pushAllLocalMemos();
     await _pushAllLocalBooks();
-
-    final remoteBooks = await pullBooks();
-    if (remoteBooks.isEmpty) {
-      debugPrint('[SyncService] 원격에 책 없음 — pull 종료');
-      return;
-    }
+    await pushAllLocalReadingSessions();
+    await pushAllLocalProcessingHistory();
 
     final uid = _currentUserId!;
 
-    // 각 remote 책에 대해 충돌 해결
+    final remoteBooks = await pullBooks();
+    // 원격에 책이 없어도 메모/세션/이력 pull은 계속 진행해야 하므로
+    // early return하지 않는다.
     for (final remoteRow in remoteBooks) {
       final remoteBookId = remoteRow['book_id'] as String;
       final remoteUpdatedAtStr = remoteRow['updated_at'] as String?;
@@ -400,6 +644,14 @@ class SyncService {
     // --- 메모 pull ---
     await _pullMemosFromSupabase(uid);
     debugPrint('[SyncService] pullFromSupabase 완료 (메모)');
+
+    // --- 독서 세션 pull ---
+    await _pullReadingSessionsFromSupabase(uid);
+    debugPrint('[SyncService] pullFromSupabase 완료 (독서 세션)');
+
+    // --- 처리 이력 pull ---
+    await _pullProcessingHistoryFromSupabase(uid);
+    debugPrint('[SyncService] pullFromSupabase 완료 (처리 이력)');
   }
 
   /// Supabase에서 메모를 풀 + 충돌 해결 + 로컬 DB 업데이트.
@@ -478,6 +730,144 @@ class SyncService {
     );
 
     await _db.insertMemo(memo);
+  }
+
+  /// Supabase에서 독서 세션을 풀 + 충돌 해결 + 로컬 DB 업데이트.
+  Future<void> _pullReadingSessionsFromSupabase(String uid) async {
+    final remoteSessions = await pullReadingSessions();
+    if (remoteSessions.isEmpty) {
+      debugPrint('[SyncService] 원격에 독서 세션 없음 — pull 종료');
+      return;
+    }
+
+    for (final remoteRow in remoteSessions) {
+      final remoteSessionId = remoteRow['session_id'] as String?;
+      if (remoteSessionId == null || remoteSessionId.isEmpty) continue;
+
+      final remoteUpdatedAtStr = remoteRow['updated_at'] as String?;
+      final remoteUpdatedAt = remoteUpdatedAtStr != null
+          ? DateTime.tryParse(remoteUpdatedAtStr)?.toLocal()
+          : null;
+
+      final localSession = await _db.getReadingSessionById(remoteSessionId);
+
+      if (localSession == null) {
+        // 로컬에 없는 remote 세션 → 로컬에 추가
+        await _upsertLocalSessionFromRemote(remoteRow, uid);
+        debugPrint('[SyncService] 로컬에 세션 추가: $remoteSessionId');
+      } else {
+        final localUpdatedAt = localSession.updatedAt;
+        if (remoteUpdatedAt != null &&
+            remoteUpdatedAt.isAfter(localUpdatedAt ?? DateTime(0))) {
+          // remote가 더 최신 → 로컬 덮어쓰기
+          await _upsertLocalSessionFromRemote(remoteRow, uid);
+          debugPrint('[SyncService] remote 우선 → 로컬 세션 덮어쓰기: $remoteSessionId');
+        } else {
+          // 로컬이 더 최신 → push
+          await pushReadingSession(localSession);
+          debugPrint('[SyncService] 로컬 우선 → pushReadingSession: $remoteSessionId');
+        }
+      }
+    }
+  }
+
+  /// remote 세션 행을 로컬 DB에 upsert.
+  Future<void> _upsertLocalSessionFromRemote(
+    Map<String, dynamic> remoteRow,
+    String userId,
+  ) async {
+    final session = ReadingSession(
+      sessionId: remoteRow['session_id'] as String,
+      bookId: remoteRow['book_id'] as String,
+      readRound: (remoteRow['read_round'] as int?) ?? 1,
+      firstStartDate:
+          _parseDate(remoteRow['first_start_date'])?.toLocal() ?? DateTime.now(),
+      completedDate: _parseDate(remoteRow['completed_date'])?.toLocal(),
+      accumulatedActiveTime: (remoteRow['accumulated_active_time'] as int?) ?? 0,
+      status: ReadingSessionStatus.fromString(
+          (remoteRow['status'] as String?) ?? 'READING'),
+      userId: userId,
+      updatedAt: _parseDate(remoteRow['updated_at'])?.toLocal(),
+      deletedAt: _parseDate(remoteRow['deleted_at'])?.toLocal(),
+    );
+
+    // ConflictAlgorithm.replace로 upsert
+    await _db.insertReadingSession(session);
+  }
+
+  /// Supabase에서 처리 이력을 풀 + 충돌 해결 + 로컬 DB 업데이트.
+  Future<void> _pullProcessingHistoryFromSupabase(String uid) async {
+    final remoteHistory = await pullProcessingHistory();
+    if (remoteHistory.isEmpty) {
+      debugPrint('[SyncService] 원격에 처리 이력 없음 — pull 종료');
+      return;
+    }
+
+    for (final remoteRow in remoteHistory) {
+      final remoteItemId = remoteRow['item_id'] as String?;
+      if (remoteItemId == null || remoteItemId.isEmpty) continue;
+
+      final remoteUpdatedAtStr = remoteRow['updated_at'] as String?;
+      final remoteUpdatedAt = remoteUpdatedAtStr != null
+          ? DateTime.tryParse(remoteUpdatedAtStr)?.toLocal()
+          : null;
+
+      final localItem = await _db.getProcessingHistoryByItemId(remoteItemId);
+
+      if (localItem == null) {
+        // 로컬에 없는 remote 이력 → 로컬에 추가
+        await _upsertLocalHistoryFromRemote(remoteRow, uid);
+        debugPrint('[SyncService] 로컬에 처리 이력 추가: $remoteItemId');
+      } else {
+        final localUpdatedAt = localItem.updatedAt;
+        if (remoteUpdatedAt != null &&
+            remoteUpdatedAt.isAfter(localUpdatedAt ?? DateTime(0))) {
+          // remote가 더 최신 → 로컬 덮어쓰기
+          await _upsertLocalHistoryFromRemote(remoteRow, uid, existing: localItem);
+          debugPrint('[SyncService] remote 우선 → 로컬 처리 이력 덮어쓰기: $remoteItemId');
+        } else {
+          // 로컬이 더 최신 → push
+          await pushProcessingHistory(localItem);
+          debugPrint('[SyncService] 로컬 우선 → pushProcessingHistory: $remoteItemId');
+        }
+      }
+    }
+  }
+
+  /// remote 이력 행을 로컬 DB에 upsert.
+  /// [existing]이 있으면 기존 int id를 유지 (AUTOINCREMENT PK 보존).
+  Future<void> _upsertLocalHistoryFromRemote(
+    Map<String, dynamic> remoteRow,
+    String userId, {
+    ProcessingHistoryItem? existing,
+  }) async {
+    final type = switch (remoteRow['type'] as String?) {
+      'url' => ContentType.url,
+      'image' => ContentType.image,
+      _ => ContentType.text,
+    };
+    final item = ProcessingHistoryItem(
+      id: existing?.id,
+      itemId: remoteRow['item_id'] as String,
+      content: (remoteRow['content'] as String?) ?? '',
+      type: type,
+      status: (remoteRow['status'] as String?) ?? 'failed',
+      progress: (remoteRow['progress'] as num?)?.toDouble() ?? 1.0,
+      error: _parseNullable(remoteRow['error']),
+      memoTitle: _parseNullable(remoteRow['memo_title']),
+      memoId: remoteRow['memo_id'] as int?,
+      createdAt: _parseDate(remoteRow['created_at'])?.toLocal() ?? DateTime.now(),
+      completedAt: _parseDate(remoteRow['completed_at'])?.toLocal(),
+      userId: userId,
+      updatedAt: _parseDate(remoteRow['updated_at'])?.toLocal(),
+      deletedAt: _parseDate(remoteRow['deleted_at'])?.toLocal(),
+    );
+
+    if (existing?.id != null) {
+      await _db.updateProcessingHistory(item);
+    } else {
+      await _db.insertProcessingHistory(item);
+    }
   }
 
   /// remote 행(row)을 로컬 DB에 upsert.
@@ -559,6 +949,38 @@ class SyncService {
     }
   }
 
+  /// 로컬에 있는 모든 독서 세션을 Supabase에 push (백업/초기 업로드).
+  Future<void> pushAllLocalReadingSessions() async {
+    if (!_canSync) return;
+
+    try {
+      final sessions = await _db.getAllReadingSessions();
+      debugPrint('[SyncService] pushAllLocalReadingSessions: ${sessions.length}건');
+      for (final session in sessions) {
+        await pushReadingSession(session);
+      }
+      debugPrint('[SyncService] pushAllLocalReadingSessions 완료');
+    } catch (e) {
+      debugPrint('[SyncService] pushAllLocalReadingSessions 실패: $e');
+    }
+  }
+
+  /// 로컬에 있는 모든 처리 이력을 Supabase에 push (백업/초기 업로드).
+  Future<void> pushAllLocalProcessingHistory() async {
+    if (!_canSync) return;
+
+    try {
+      final history = await _db.getAllProcessingHistory();
+      debugPrint('[SyncService] pushAllLocalProcessingHistory: ${history.length}건');
+      for (final item in history) {
+        await pushProcessingHistory(item);
+      }
+      debugPrint('[SyncService] pushAllLocalProcessingHistory 완료');
+    } catch (e) {
+      debugPrint('[SyncService] pushAllLocalProcessingHistory 실패: $e');
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Sync Queue 재시도
   // ---------------------------------------------------------------------------
@@ -600,6 +1022,44 @@ class SyncService {
             final memo = await _db.getMemoByMemoId(memoId);
             if (memo != null) {
               await pushMemo(memo);
+            }
+          }
+          await _db.deleteSyncQueue(id);
+          continue;
+        }
+
+        if (entityType == 'reading_session') {
+          // 독서 세션 재시도
+          final sessionId = entityId ?? bookId ?? '';
+          if (sessionId.isEmpty) {
+            await _db.deleteSyncQueue(id);
+            continue;
+          }
+          if (operation == 'delete') {
+            await pushReadingSessionDelete(sessionId);
+          } else {
+            final session = await _db.getReadingSessionById(sessionId);
+            if (session != null) {
+              await pushReadingSession(session);
+            }
+          }
+          await _db.deleteSyncQueue(id);
+          continue;
+        }
+
+        if (entityType == 'processing_history') {
+          // 처리 이력 재시도
+          final itemId = entityId ?? bookId ?? '';
+          if (itemId.isEmpty) {
+            await _db.deleteSyncQueue(id);
+            continue;
+          }
+          if (operation == 'delete') {
+            await pushProcessingHistoryDelete(itemId);
+          } else {
+            final item = await _db.getProcessingHistoryByItemId(itemId);
+            if (item != null) {
+              await pushProcessingHistory(item);
             }
           }
           await _db.deleteSyncQueue(id);

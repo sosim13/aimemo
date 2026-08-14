@@ -303,19 +303,23 @@ class ContentProcessingService {
     int? memoId,
   }) async {
     try {
-      await _databaseService.insertProcessingHistory(
-        ProcessingHistoryItem(
-          itemId: itemId,
-          content: content,
-          type: type,
-          status: status,
-          progress: status == 'completed' ? 1.0 : 0.0,
-          error: error,
-          memoTitle: memoTitle,
-          memoId: memoId,
-          completedAt: DateTime.now(),
-        ),
+      final now = DateTime.now();
+      final item = ProcessingHistoryItem(
+        itemId: itemId,
+        content: content,
+        type: type,
+        status: status,
+        progress: status == 'completed' ? 1.0 : 0.0,
+        error: error,
+        memoTitle: memoTitle,
+        memoId: memoId,
+        createdAt: now,
+        completedAt: now,
+        updatedAt: now,
       );
+      await _databaseService.insertProcessingHistory(item);
+      // 동기화 — 처리 이력도 Supabase에 반영 (비로그인 시 내부 no-op)
+      _syncService.debouncePushProcessingHistory(item);
     } catch (e) {
       await _debug.log('CPS: Failed to save history: $e');
     }
@@ -330,19 +334,23 @@ class ContentProcessingService {
     String? error,
   }) async {
     try {
-      await _databaseService.insertProcessingHistory(
-        ProcessingHistoryItem(
-          itemId: _uuid.v4(),
-          content: memo.title,
-          type: _memoContentType(memo),
-          status: status,
-          progress: status == 'completed' ? 1.0 : 0.0,
-          error: error,
-          memoTitle: memo.title,
-          memoId: memo.id,
-          completedAt: DateTime.now(),
-        ),
+      final now = DateTime.now();
+      final item = ProcessingHistoryItem(
+        itemId: _uuid.v4(),
+        content: memo.title,
+        type: _memoContentType(memo),
+        status: status,
+        progress: status == 'completed' ? 1.0 : 0.0,
+        error: error,
+        memoTitle: memo.title,
+        memoId: memo.id,
+        createdAt: now,
+        completedAt: now,
+        updatedAt: now,
       );
+      await _databaseService.insertProcessingHistory(item);
+      // 동기화
+      _syncService.debouncePushProcessingHistory(item);
     } catch (e) {
       await _debug.log('CPS: Failed to save retry history: $e');
     }

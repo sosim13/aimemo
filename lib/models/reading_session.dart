@@ -34,6 +34,11 @@ enum ReadingSessionStatus {
 /// A book can have multiple sessions — `readRound` is 1 for the first read,
 /// 2 for the second (re-read), etc. Active reading time accumulates across
 /// pause/resume cycles within the same session via [accumulatedActiveTime].
+///
+/// 동기화 관련 필드 (Supabase):
+/// - [userId]: 동기화용 현재 로그인 사용자 식별자 (user_id)
+/// - [updatedAt]: last-write-wins 충돌 해결용 최종 수정 시각
+/// - [deletedAt]: 소프트 삭제(soft delete) 시각. null이면 활성 상태.
 class ReadingSession {
   final String sessionId;
   final String bookId;
@@ -54,6 +59,17 @@ class ReadingSession {
   /// Current lifecycle state of the session.
   final ReadingSessionStatus status;
 
+  /// 동기화용 사용자 식별자 (Supabase auth.users.id).
+  /// 비로그인 상태에서 생성된 세션은 null.
+  final String? userId;
+
+  /// 최종 수정 시각 — Supabase와의 last-write-wins 충돌 해결에 사용.
+  /// 로컬 DB에서는 TEXT(ISO 8601) 형태로 저장.
+  final DateTime? updatedAt;
+
+  /// 소프트 삭제 시각. null이면 활성 세션, 값이 있으면 삭제된 세션.
+  final DateTime? deletedAt;
+
   ReadingSession({
     required this.sessionId,
     required this.bookId,
@@ -62,6 +78,9 @@ class ReadingSession {
     this.completedDate,
     required this.accumulatedActiveTime,
     required this.status,
+    this.userId,
+    this.updatedAt,
+    this.deletedAt,
   });
 
   /// True when [status] is [ReadingSessionStatus.completed].
@@ -81,6 +100,9 @@ class ReadingSession {
     DateTime? completedDate,
     int? accumulatedActiveTime,
     ReadingSessionStatus? status,
+    String? userId,
+    DateTime? updatedAt,
+    DateTime? deletedAt,
   }) {
     return ReadingSession(
       sessionId: sessionId ?? this.sessionId,
@@ -90,6 +112,9 @@ class ReadingSession {
       completedDate: completedDate ?? this.completedDate,
       accumulatedActiveTime: accumulatedActiveTime ?? this.accumulatedActiveTime,
       status: status ?? this.status,
+      userId: userId ?? this.userId,
+      updatedAt: updatedAt ?? this.updatedAt,
+      deletedAt: deletedAt ?? this.deletedAt,
     );
   }
 
@@ -102,6 +127,9 @@ class ReadingSession {
       'completedDate': completedDate?.toIso8601String(),
       'accumulatedActiveTime': accumulatedActiveTime,
       'status': status.label,
+      'userId': userId,
+      'updatedAt': updatedAt?.toIso8601String(),
+      'deletedAt': deletedAt?.toIso8601String(),
     };
   }
 
@@ -118,7 +146,29 @@ class ReadingSession {
           (map['accumulatedActiveTime'] as int?) ?? 0,
       status: ReadingSessionStatus.fromString(
           (map['status'] as String?) ?? 'READING'),
+      userId: _parseNullableString(map['userId']),
+      updatedAt: _parseDateTime(map['updatedAt']),
+      deletedAt: _parseDateTime(map['deletedAt']),
     );
+  }
+
+  /// null 또는 빈 문자열 → null 반환 (String? 필드 안전 파싱용)
+  static String? _parseNullableString(dynamic value) {
+    if (value == null) return null;
+    final s = value.toString();
+    return s.isEmpty ? null : s;
+  }
+
+  /// TEXT 형태의 ISO 8601 날짜 문자열 → DateTime?. 빈 값/파싱 실패 시 null.
+  static DateTime? _parseDateTime(dynamic value) {
+    if (value == null) return null;
+    final s = value.toString();
+    if (s.isEmpty) return null;
+    try {
+      return DateTime.parse(s);
+    } catch (_) {
+      return null;
+    }
   }
 
   @override

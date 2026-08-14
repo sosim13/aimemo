@@ -74,6 +74,8 @@ class ReadingService {
   }
 
   Future<int> deleteBook(String bookId) async {
+    // 세션들도 함께 삭제되므로 원격 세션 삭제를 먼저 예약
+    await _pushDeleteAllSessions(bookId);
     final result = _db.deleteBook(bookId);
     // 동기화 — 원격에서도 삭제 (soft delete push)
     _sync.pushDelete(bookId).catchError((e) {
@@ -103,6 +105,8 @@ class ReadingService {
 
     // Delete sessions + book row. The DB layer already cascades session
     // deletion inside a single transaction.
+    // 세션들도 함께 삭제되므로 원격 세션 삭제를 먼저 예약
+    await _pushDeleteAllSessions(bookId);
     final result = await _db.deleteBook(bookId);
 
     // 동기화 — 원격에서도 삭제 (soft delete push)
@@ -126,6 +130,22 @@ class ReadingService {
     _sync.debouncePush(updated);
   }
 
+  /// [bookId]에 속한 모든 세션을 원격에서 soft delete (책 삭제 시 호출).
+  Future<void> _pushDeleteAllSessions(String bookId) async {
+    try {
+      final sessions = await getSessionsForBook(bookId);
+      for (final s in sessions) {
+        _sync.pushReadingSessionDelete(s.sessionId).catchError((e) {
+          // ignore: avoid_print
+          print('[ReadingService] book 세션 삭제 sync 오류: ${s.sessionId} — $e');
+        });
+      }
+    } catch (e) {
+      // ignore: avoid_print
+      print('[ReadingService] _pushDeleteAllSessions 오류: $e');
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Reading Sessions
   // ---------------------------------------------------------------------------
@@ -134,15 +154,19 @@ class ReadingService {
   /// `readRound` starts at 1.
   Future<ReadingSession> startReading(String bookId) async {
     final sessionId = _uuid.v4();
+    final now = DateTime.now();
     final session = ReadingSession(
       sessionId: sessionId,
       bookId: bookId,
       readRound: 1,
-      firstStartDate: DateTime.now(),
+      firstStartDate: now,
       accumulatedActiveTime: 0,
       status: ReadingSessionStatus.reading,
+      updatedAt: now,
     );
     await _db.insertReadingSession(session);
+    // 동기화 — 독서 이력도 Supabase에 반영
+    _sync.debouncePushReadingSession(session);
     return session;
   }
 
@@ -154,15 +178,19 @@ class ReadingService {
         ? 0
         : sessions.map((s) => s.readRound).reduce((a, b) => a > b ? a : b);
     final sessionId = _uuid.v4();
+    final now = DateTime.now();
     final session = ReadingSession(
       sessionId: sessionId,
       bookId: bookId,
       readRound: maxRound + 1,
-      firstStartDate: DateTime.now(),
+      firstStartDate: now,
       accumulatedActiveTime: 0,
       status: ReadingSessionStatus.reading,
+      updatedAt: now,
     );
     await _db.insertReadingSession(session);
+    // 동기화
+    _sync.debouncePushReadingSession(session);
     return session;
   }
 
@@ -171,9 +199,13 @@ class ReadingService {
   /// via [addActiveTime] while the timer runs.
   Future<void> resumeSession(ReadingSession session) async {
     if (session.status != ReadingSessionStatus.paused) return;
-    await _db.updateReadingSession(
-      session.copyWith(status: ReadingSessionStatus.reading),
+    final updated = session.copyWith(
+      status: ReadingSessionStatus.reading,
+      updatedAt: DateTime.now(),
     );
+    await _db.updateReadingSession(updated);
+    // 동기화
+    _sync.debouncePushReadingSession(updated);
   }
 
   /// Marks a session as paused without finalizing the reading.
@@ -181,9 +213,13 @@ class ReadingService {
   /// (or use [pauseAndCommit], which does it in one shot).
   Future<void> pauseSession(ReadingSession session) async {
     if (session.status == ReadingSessionStatus.completed) return;
-    await _db.updateReadingSession(
-      session.copyWith(status: ReadingSessionStatus.paused),
+    final updated = session.copyWith(
+      status: ReadingSessionStatus.paused,
+      updatedAt: DateTime.now(),
     );
+    await _db.updateReadingSession(updated);
+    // 동기화
+    _sync.debouncePushReadingSession(updated);
   }
 
   /// Adds [deltaSeconds] of active time to the session and (optionally)
@@ -201,8 +237,11 @@ class ReadingService {
     final updated = session.copyWith(
       accumulatedActiveTime: newTotal,
       status: newStatus,
+      updatedAt: DateTime.now(),
     );
     await _db.updateReadingSession(updated);
+    // 동기화 — 1초마다 호출되므로 debounce가 과도한 호출을 막는다.
+    _sync.debouncePushReadingSession(updated);
     return updated;
   }
 
@@ -221,9 +260,12 @@ class ReadingService {
       accumulatedActiveTime: activeTime,
       completedDate: now,
       status: ReadingSessionStatus.completed,
+      updatedAt: now,
     );
     await _db.updateReadingSession(updated);
     await _bumpReadCount(session.bookId);
+    // 동기화 — 완료된 세션까지 원격에 반영
+    _sync.debouncePushReadingSession(updated);
     return updated;
   }
 
@@ -241,8 +283,15 @@ class ReadingService {
     return null;
   }
 
-  Future<int> deleteSession(String sessionId) async =>
-      _db.deleteReadingSession(sessionId);
+  Future<int> deleteSession(String sessionId) async {
+    final result = await _db.deleteReadingSession(sessionId);
+    // 동기화 — 원격에서도 세션 삭제 (soft delete push)
+    _sync.pushReadingSessionDelete(sessionId).catchError((e) {
+      // ignore: avoid_print
+      print('[ReadingService] deleteSession sync 오류: $e');
+    });
+    return result;
+  }
 
   // ---------------------------------------------------------------------------
   // Calendar — 날짜별 세션 조회

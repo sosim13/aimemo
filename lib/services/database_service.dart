@@ -24,7 +24,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 11,
+      version: 12,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -79,7 +79,10 @@ class DatabaseService {
         memoTitle TEXT,
         memoId INTEGER,
         createdAt TEXT NOT NULL,
-        completedAt TEXT
+        completedAt TEXT,
+        userId TEXT,
+        updatedAt TEXT,
+        deletedAt TEXT
       )
     ''');
 
@@ -117,6 +120,9 @@ class DatabaseService {
         completedDate TEXT,
         accumulatedActiveTime INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'READING',
+        userId TEXT,
+        updatedAt TEXT,
+        deletedAt TEXT,
         FOREIGN KEY (bookId) REFERENCES books(bookId) ON DELETE CASCADE
       )
     ''');
@@ -324,6 +330,33 @@ class DatabaseService {
         CREATE INDEX IF NOT EXISTS idx_sync_queue_entityId ON sync_queue(entityId)
       ''');
     }
+    // version 12: reading_sessions/processing_history 동기화 — userId/updatedAt/deletedAt
+    // 컬럼 추가. 컬럼 존재 여부를 먼저 확인해 중복 추가 오류를 방지한다.
+    if (oldVersion < 12) {
+      // reading_sessions 동기화 컬럼
+      var cols = await db.rawQuery('PRAGMA table_info(reading_sessions)');
+      if (!cols.any((c) => c['name'] == 'userId')) {
+        await db.execute('ALTER TABLE reading_sessions ADD COLUMN userId TEXT');
+      }
+      if (!cols.any((c) => c['name'] == 'updatedAt')) {
+        await db.execute('ALTER TABLE reading_sessions ADD COLUMN updatedAt TEXT');
+      }
+      if (!cols.any((c) => c['name'] == 'deletedAt')) {
+        await db.execute('ALTER TABLE reading_sessions ADD COLUMN deletedAt TEXT');
+      }
+
+      // processing_history 동기화 컬럼
+      cols = await db.rawQuery('PRAGMA table_info(processing_history)');
+      if (!cols.any((c) => c['name'] == 'userId')) {
+        await db.execute('ALTER TABLE processing_history ADD COLUMN userId TEXT');
+      }
+      if (!cols.any((c) => c['name'] == 'updatedAt')) {
+        await db.execute('ALTER TABLE processing_history ADD COLUMN updatedAt TEXT');
+      }
+      if (!cols.any((c) => c['name'] == 'deletedAt')) {
+        await db.execute('ALTER TABLE processing_history ADD COLUMN deletedAt TEXT');
+      }
+    }
   }
 
   // CRUD Operations
@@ -489,6 +522,32 @@ class DatabaseService {
     return await db.delete('processing_history', where: 'id = ?', whereArgs: [id]);
   }
 
+  /// itemId(UUID)로 처리 이력 조회 — sync_queue 재시도/pull 충돌 해결용.
+  Future<ProcessingHistoryItem?> getProcessingHistoryByItemId(String itemId) async {
+    final db = await database;
+    final maps = await db.query(
+      'processing_history',
+      where: 'itemId = ?',
+      whereArgs: [itemId],
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return ProcessingHistoryItem.fromMap(maps.first);
+  }
+
+  /// id 기준 처리 이력 업데이트 — pull 충돌 해결(remote 우선)용.
+  Future<int> updateProcessingHistory(ProcessingHistoryItem item) async {
+    final db = await database;
+    if (item.id == null) return 0;
+    final map = item.toMap()..remove('id');
+    return await db.update(
+      'processing_history',
+      map,
+      where: 'id = ?',
+      whereArgs: [item.id],
+    );
+  }
+
   Future<int> clearAllProcessingHistory() async {
     final db = await database;
     return await db.delete('processing_history');
@@ -623,6 +682,27 @@ class DatabaseService {
       orderBy: 'readRound ASC',
     );
     return maps.map((m) => ReadingSession.fromMap(m)).toList();
+  }
+
+  /// 모든 독서 세션 조회 — Supabase 동기화(pushAllLocal)용.
+  Future<List<ReadingSession>> getAllReadingSessions() async {
+    final db = await database;
+    // reading_sessions에는 createdAt 컬럼이 없으므로 firstStartDate로 정렬.
+    final maps = await db.query('reading_sessions', orderBy: 'firstStartDate');
+    return maps.map((m) => ReadingSession.fromMap(m)).toList();
+  }
+
+  /// sessionId(UUID)로 세션 조회 — sync_queue 재시도용.
+  Future<ReadingSession?> getReadingSessionById(String sessionId) async {
+    final db = await database;
+    final maps = await db.query(
+      'reading_sessions',
+      where: 'sessionId = ?',
+      whereArgs: [sessionId],
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return ReadingSession.fromMap(maps.first);
   }
 
   Future<int> deleteReadingSession(String sessionId) async {

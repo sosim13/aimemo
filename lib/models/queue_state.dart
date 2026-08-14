@@ -152,6 +152,17 @@ class ProcessingHistoryItem {
   final DateTime createdAt;
   final DateTime? completedAt;
 
+  /// 동기화용 사용자 식별자 (Supabase auth.users.id).
+  /// 비로그인 상태에서 생성된 이력은 null.
+  final String? userId;
+
+  /// 최종 수정 시각 — Supabase와의 last-write-wins 충돌 해결에 사용.
+  /// 로컬 DB에서는 TEXT(ISO 8601) 형태로 저장.
+  final DateTime? updatedAt;
+
+  /// 소프트 삭제 시각. null이면 활성 이력, 값이 있으면 삭제된 이력.
+  final DateTime? deletedAt;
+
   ProcessingHistoryItem({
     this.id,
     required this.itemId,
@@ -164,6 +175,9 @@ class ProcessingHistoryItem {
     this.memoId,
     DateTime? createdAt,
     this.completedAt,
+    this.userId,
+    this.updatedAt,
+    this.deletedAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
   Map<String, dynamic> toMap() => {
@@ -182,6 +196,9 @@ class ProcessingHistoryItem {
         'memoId': memoId,
         'createdAt': createdAt.toIso8601String(),
         'completedAt': completedAt?.toIso8601String(),
+        'userId': userId,
+        'updatedAt': updatedAt?.toIso8601String(),
+        'deletedAt': deletedAt?.toIso8601String(),
       };
 
   factory ProcessingHistoryItem.fromMap(Map<String, dynamic> map) {
@@ -203,7 +220,29 @@ class ProcessingHistoryItem {
       completedAt: map['completedAt'] != null
           ? DateTime.parse(map['completedAt'] as String)
           : null,
+      userId: _parseNullableString(map['userId']),
+      updatedAt: _parseDateTime(map['updatedAt']),
+      deletedAt: _parseDateTime(map['deletedAt']),
     );
+  }
+
+  /// null 또는 빈 문자열 → null 반환 (String? 필드 안전 파싱용)
+  static String? _parseNullableString(dynamic value) {
+    if (value == null) return null;
+    final s = value.toString();
+    return s.isEmpty ? null : s;
+  }
+
+  /// TEXT 형태의 ISO 8601 날짜 문자열 → DateTime?. 빈 값/파싱 실패 시 null.
+  static DateTime? _parseDateTime(dynamic value) {
+    if (value == null) return null;
+    final s = value.toString();
+    if (s.isEmpty) return null;
+    try {
+      return DateTime.parse(s);
+    } catch (_) {
+      return null;
+    }
   }
 }
 
