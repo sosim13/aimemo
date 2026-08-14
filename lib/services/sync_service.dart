@@ -209,6 +209,15 @@ class SyncService {
 
     final uid = _currentUserId!;
     try {
+      // 이미지 메모: thumbnail_url이 없고 로컬 이미지 파일이 있으면 업로드 시도
+      // (YouTube/TikTok 썸네일 등 원격 URL이 이미 있으면 업로드하지 않음)
+      String? thumbnailUrl = memo.thumbnailUrl;
+      if (thumbnailUrl == null &&
+          memo.imagePath != null &&
+          memo.imagePath!.isNotEmpty) {
+        thumbnailUrl = await _thumbnailService.uploadMemoImage(memo, uid);
+      }
+
       final data = {
         'memo_id': memo.memoId,
         'user_id': uid,
@@ -217,7 +226,7 @@ class SyncService {
         'category': memo.category,
         'source_url': memo.sourceUrl,
         'youtube_video_id': memo.youtubeVideoId,
-        'thumbnail_url': memo.thumbnailUrl,
+        'thumbnail_url': thumbnailUrl,
         'image_path': memo.imagePath,
         'address': memo.address,
         'search_keyword': memo.searchKeyword,
@@ -730,6 +739,27 @@ class SyncService {
     );
 
     await _db.insertMemo(memo);
+
+    // 메모 이미지(memo-images Storage URL)가 있고 로컬 파일이 없으면 백그라운드 다운로드.
+    // YouTube/TikTok 썸네일(일반 http URL)은 로컬에 저장하지 않음 — NetworkImage로 표시.
+    if (memo.thumbnailUrl != null &&
+        memo.thumbnailUrl!.contains('memo-images/') &&
+        (memo.imagePath == null || memo.imagePath!.isEmpty)) {
+      _thumbnailService
+          .downloadMemoImage(memo)
+          .then((localPath) {
+            if (localPath != null) {
+              // 다운로드 완료 후 로컬 imagePath 업데이트
+              _db.updateMemo(memo.copyWith(imagePath: localPath));
+              debugPrint(
+                '[SyncService] 메모 이미지 다운로드 후 로컬 경로 업데이트: ${memo.memoId}',
+              );
+            }
+          })
+          .catchError((e) {
+            debugPrint('[SyncService] 메모 이미지 다운로드 실패: ${memo.memoId} — $e');
+          });
+    }
   }
 
   /// Supabase에서 독서 세션을 풀 + 충돌 해결 + 로컬 DB 업데이트.
