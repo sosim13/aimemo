@@ -58,6 +58,15 @@ class MainActivity : FlutterActivity() {
                 "pendingCount" -> {
                     result.success(AimemoQueue.pendingCount(applicationContext))
                 }
+                "clearAll" -> {
+                    AimemoQueue.clearAll(applicationContext)
+                    result.success(null)
+                }
+                "removeById" -> {
+                    val id = call.argument<String>("id")
+                    if (id != null) AimemoQueue.removeById(applicationContext, id)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }

@@ -53,11 +53,7 @@ class ProcessingResult {
   final String? title;
   final String? error;
 
-  const ProcessingResult({
-    required this.success,
-    this.title,
-    this.error,
-  });
+  const ProcessingResult({required this.success, this.title, this.error});
 }
 
 /// Status of the queue
@@ -113,8 +109,10 @@ class ContentProcessingService {
 
   /// Current stage of the item being processed (for progress tracking).
   ProcessingStage _currentStage = ProcessingStage.queued;
+
   /// Current progress (0.0–1.0) of the item being processed.
   double _currentProgress = 0.0;
+
   /// Status label for the current processing stage.
   String _currentStatusText = '처리 중';
 
@@ -122,16 +120,29 @@ class ContentProcessingService {
 
   /// The memo currently being retried (null if idle).
   Memo? _retryingMemo;
+
   /// Current stage of the retry operation.
   ProcessingStage _retryStage = ProcessingStage.queued;
+
   /// Current progress (0.0–1.0) of the retry.
   double _retryProgress = 0.0;
+
   /// Status label for the retry stage.
   String _retryStatusText = '';
+
   /// Last emitted retry stage — used by [loadHistoryIntoState] to detect change.
   ProcessingStage? _lastEmittedRetryStage;
+
   /// Last emitted retry queue length — detects new queued retries.
   int _lastRetryQueueLength = 0;
+
+  /// Last emitted retrying memo id — 재요약 시작(null→id)/완료(id→null) 전이 감지.
+  ///
+  /// 재요약이 완료되어도 처리 기록 저장(_saveRetryHistory)이 실패하는 등의 이유로
+  /// history가 변하지 않으면 dedup 로직이 상태를 재방출하지 않아 UI가
+  /// 80%(저장 중)에 멈춰있게 된다. 이 필드로 retry active 전이를 감지하여
+  /// 재요약 종료 시 반드시 상태를 갱신한다.
+  int? _lastEmittedRetryingMemoId;
 
   /// Queue of memos awaiting retry (processed sequentially to avoid concurrent
   /// AI inference which would crash the local model / corrupt shared fields).
@@ -161,15 +172,20 @@ class ContentProcessingService {
 
   final _uuid = const Uuid();
 
-  /// Cancel the currently processing item or retry.
-  /// Saves a "사용자가 취소" failed entry to history and clears all pending queues.
+  /// Cancel only the currently processing item or retry.
+  /// 대기중인 나머지 큐는 유지하고, 현재 처리중인 건 1개만 취소한다.
+  /// 취소된 건은 실패 처리하여 처리 기록에 남기고, 필요시 재시도 가능.
   Future<void> cancelCurrentItem() async {
     _userCancelled = true;
 
-    // 1. Abort the LLM provider
+    // 1. Abort the LLM provider (현재 처리중인 inference 즉시 중단)
+    //    이 호출로 인해 진행중이던 processItem / _processSingleRetry는
+    //    예외를 던지거나 빈 결과를 반환하며 종료된다.
+    //    큐에 남은 다음 항목은 _processNext / retryMemo가 자연스럽게 이어받는다.
     _llmService.cancel();
 
-    // 2. Save current processing item as failed
+    // 2. 메모리 큐에서 처리중인 건 1건만 실패 처리
+    //    _queue 자체는 clear하지 않는다 — 대기중인 항목은 계속 처리.
     if (_currentItem != null && _currentItemId != null) {
       await _saveHistory(
         itemId: _currentItemId!,
@@ -178,39 +194,46 @@ class ContentProcessingService {
         status: 'failed',
         error: '사용자가 처리를 취소했습니다.',
       );
+      _currentItem = null;
+      _currentItemId = null;
+      _currentStage = ProcessingStage.queued;
+      _currentProgress = 0.0;
+      _currentStatusText = '';
     }
 
-    // 3. Save current retry as failed
+    // 3. 현재 재시도중인 건 1건만 실패 처리
+    //    _retryQueue는 유지 — retryMemo의 try/finally가 이어서 다음 retry를
+    //    자연스럽게 진행한다. _isRetryLock은 건드리지 않는다.
     if (_retryingMemo != null) {
       await _saveRetryHistory(
         memo: _retryingMemo!,
         status: 'failed',
         error: '사용자가 처리를 취소했습니다.',
       );
+      // _retryingMemo는 retryMemo의 finally에서 null로 리셋하므로 여기서 건드리지 않음
     }
 
-    // 4. Clear all pending queues
-    _queue.clear();
-    _retryQueue.clear();
-    _isRetryLock = false;
+    // 4. native 큐에서 현재 처리중인 첫 번째 건만 제거
+    //    (나머지 대기중인 항목은 유지하여 backgroundMain이 계속 처리)
+    try {
+      final pending = await BackgroundQueueService().getPendingItems();
+      if (pending.isNotEmpty) {
+        await BackgroundQueueService().removeById(pending.first.id);
+      }
+    } catch (_) {}
 
-    // 5. Reset state
-    _currentItem = null;
-    _currentItemId = null;
-    _currentStage = ProcessingStage.queued;
-    _currentProgress = 0.0;
-    _currentStatusText = '';
-    _retryingMemo = null;
-    _retryStage = ProcessingStage.queued;
-    _retryProgress = 0.0;
-    _retryStatusText = '';
-    _isProcessing = false;
+    // 5. 메모리 큐에 남은 대기항목이 있고, 처리 루프가 멈춰있다면 재개
+    if (_queue.isNotEmpty && !_isProcessing) {
+      _processNext();
+    }
 
     _emitQueueState();
   }
 
-  Future<ProcessingResult> processItem(ProcessingItem item,
-      {String? itemId}) async {
+  Future<ProcessingResult> processItem(
+    ProcessingItem item, {
+    String? itemId,
+  }) async {
     itemId ??= _uuid.v4();
     try {
       final title = switch (item.type) {
@@ -240,7 +263,10 @@ class ContentProcessingService {
       if (_userCancelled) {
         _userCancelled = false;
         await _debug.log('CPS: Processing cancelled by user');
-        final result = ProcessingResult(success: false, error: '사용자가 처리를 취소했습니다.');
+        final result = ProcessingResult(
+          success: false,
+          error: '사용자가 처리를 취소했습니다.',
+        );
         _resultController.add(result);
         _emitQueueState();
         return result;
@@ -277,17 +303,19 @@ class ContentProcessingService {
     int? memoId,
   }) async {
     try {
-      await _databaseService.insertProcessingHistory(ProcessingHistoryItem(
-        itemId: itemId,
-        content: content,
-        type: type,
-        status: status,
-        progress: status == 'completed' ? 1.0 : 0.0,
-        error: error,
-        memoTitle: memoTitle,
-        memoId: memoId,
-        completedAt: DateTime.now(),
-      ));
+      await _databaseService.insertProcessingHistory(
+        ProcessingHistoryItem(
+          itemId: itemId,
+          content: content,
+          type: type,
+          status: status,
+          progress: status == 'completed' ? 1.0 : 0.0,
+          error: error,
+          memoTitle: memoTitle,
+          memoId: memoId,
+          completedAt: DateTime.now(),
+        ),
+      );
     } catch (e) {
       await _debug.log('CPS: Failed to save history: $e');
     }
@@ -302,17 +330,19 @@ class ContentProcessingService {
     String? error,
   }) async {
     try {
-      await _databaseService.insertProcessingHistory(ProcessingHistoryItem(
-        itemId: _uuid.v4(),
-        content: memo.title,
-        type: _memoContentType(memo),
-        status: status,
-        progress: status == 'completed' ? 1.0 : 0.0,
-        error: error,
-        memoTitle: memo.title,
-        memoId: memo.id,
-        completedAt: DateTime.now(),
-      ));
+      await _databaseService.insertProcessingHistory(
+        ProcessingHistoryItem(
+          itemId: _uuid.v4(),
+          content: memo.title,
+          type: _memoContentType(memo),
+          status: status,
+          progress: status == 'completed' ? 1.0 : 0.0,
+          error: error,
+          memoTitle: memo.title,
+          memoId: memo.id,
+          completedAt: DateTime.now(),
+        ),
+      );
     } catch (e) {
       await _debug.log('CPS: Failed to save retry history: $e');
     }
@@ -324,21 +354,24 @@ class ContentProcessingService {
     try {
       // 1. Load completed/failed history from DB
       final history = await _databaseService.getAllProcessingHistory();
-      final historyItems = history.map((h) => QueueItemProgress(
-            id: h.itemId,
-            content: h.content,
-            type: h.type,
-            progress: 1.0,
-            stage: h.status == 'completed'
-                ? ProcessingStage.completed
-                : ProcessingStage.failed,
-            statusText: h.status == 'completed' ? '완료' : '실패',
-            isCurrent: false,
-            error: h.error,
-            memoTitle: h.memoTitle,
-            memoId: h.memoId,
-            completedAt: h.completedAt,
-          ));
+      final historyItems = history.map(
+        (h) => QueueItemProgress(
+          id: h.itemId,
+          content: h.content,
+          type: h.type,
+          progress: 1.0,
+          stage:
+              h.status == 'completed'
+                  ? ProcessingStage.completed
+                  : ProcessingStage.failed,
+          statusText: h.status == 'completed' ? '완료' : '실패',
+          isCurrent: false,
+          error: h.error,
+          memoTitle: h.memoTitle,
+          memoId: h.memoId,
+          completedAt: h.completedAt,
+        ),
+      );
       final historyList = historyItems.toList();
 
       // 2. Check native queue for items being processed or waiting
@@ -353,16 +386,19 @@ class ContentProcessingService {
           for (var i = 0; i < nativeCount; i++) {
             final n = nativePending[i];
             final isCurrent = i == 0;
-            nativeActiveItems.add(QueueItemProgress(
-              id: n.id,
-              content: n.content,
-              type: _nativeTypeToContentType(
-                  n.type.name), // BackgroundQueueType → ContentType
-              progress: isCurrent ? 0.3 : 0.0,
-              stage: ProcessingStage.queued,
-              statusText: isCurrent ? '처리 중' : '대기 중',
-              isCurrent: isCurrent,
-            ));
+            nativeActiveItems.add(
+              QueueItemProgress(
+                id: n.id,
+                content: n.content,
+                type: _nativeTypeToContentType(
+                  n.type.name,
+                ), // BackgroundQueueType → ContentType
+                progress: isCurrent ? 0.3 : 0.0,
+                stage: ProcessingStage.queued,
+                statusText: isCurrent ? '처리 중' : '대기 중',
+                isCurrent: isCurrent,
+              ),
+            );
           }
         }
       } catch (_) {
@@ -382,7 +418,8 @@ class ContentProcessingService {
       final failedCount =
           historyList.where((h) => h.stage == ProcessingStage.failed).length;
 
-      final isProcessing = nativeActiveItems.isNotEmpty ||
+      final isProcessing =
+          nativeActiveItems.isNotEmpty ||
           _currentItem != null ||
           _queue.isNotEmpty ||
           _retryingMemo != null ||
@@ -394,25 +431,31 @@ class ContentProcessingService {
           _currentItem != null && _currentStage != _lastEmittedActiveStage;
       final retryStageChanged =
           _retryingMemo != null && _retryStage != _lastEmittedRetryStage;
-      final retryQueueChanged = _retryQueue.length != _lastRetryQueueLength;
+      // 재요약 시작/완료/큐 변동 전이 감지 (retry active id + 대기 큐 길이)
+      final retryListChanged =
+          (_retryingMemo?.id) != _lastEmittedRetryingMemoId ||
+              _retryQueue.length != _lastRetryQueueLength;
       if (!_listEquals(newHistoryOnly, _historyFromDb) ||
           nativeActiveItems.length != _lastNativePendingCount ||
           activeStageChanged ||
           retryStageChanged ||
-          retryQueueChanged) {
+          retryListChanged) {
         _historyFromDb = newHistoryOnly;
         _lastNativePendingCount = nativeActiveItems.length;
         _lastEmittedActiveStage = _currentStage;
         _lastEmittedRetryStage = _retryStage;
         _lastRetryQueueLength = _retryQueue.length;
+        _lastEmittedRetryingMemoId = _retryingMemo?.id;
         if (!_stateController.isClosed) {
-          _stateController.add(QueueState(
-            items: combined,
-            isProcessing: isProcessing,
-            pendingCount: _queue.length + nativeCount,
-            completedCount: completedCount,
-            failedCount: failedCount,
-          ));
+          _stateController.add(
+            QueueState(
+              items: combined,
+              isProcessing: isProcessing,
+              pendingCount: _queue.length + nativeCount,
+              completedCount: completedCount,
+              failedCount: failedCount,
+            ),
+          );
         }
       } else {
         _historyFromDb = newHistoryOnly;
@@ -427,26 +470,30 @@ class ContentProcessingService {
   List<QueueItemProgress> _buildActiveItemsFromMemory() {
     final items = <QueueItemProgress>[];
     if (_currentItem != null) {
-      items.add(QueueItemProgress(
-        id: _currentItemId ?? _uuid.v4(),
-        content: _currentItem!.content,
-        type: _currentItem!.type,
-        progress: _currentProgress,
-        stage: _currentStage,
-        statusText: _currentStatusText,
-        isCurrent: true,
-      ));
+      items.add(
+        QueueItemProgress(
+          id: _currentItemId ?? _uuid.v4(),
+          content: _currentItem!.content,
+          type: _currentItem!.type,
+          progress: _currentProgress,
+          stage: _currentStage,
+          statusText: _currentStatusText,
+          isCurrent: true,
+        ),
+      );
     }
     for (final item in _queue) {
-      items.add(QueueItemProgress(
-        id: _uuid.v4(),
-        content: item.content,
-        type: item.type,
-        progress: 0.0,
-        stage: ProcessingStage.queued,
-        statusText: '대기 중',
-        isCurrent: false,
-      ));
+      items.add(
+        QueueItemProgress(
+          id: _uuid.v4(),
+          content: item.content,
+          type: item.type,
+          progress: 0.0,
+          stage: ProcessingStage.queued,
+          statusText: '대기 중',
+          isCurrent: false,
+        ),
+      );
     }
     return items;
   }
@@ -461,28 +508,32 @@ class ContentProcessingService {
     // Currently processing retry
     if (_retryingMemo != null) {
       final memo = _retryingMemo!;
-      items.add(QueueItemProgress(
-        id: 'retry-${memo.id}',
-        content: memo.title,
-        type: _memoContentType(memo),
-        progress: _retryProgress,
-        stage: _retryStage,
-        statusText: _retryStatusText,
-        isCurrent: true,
-      ));
+      items.add(
+        QueueItemProgress(
+          id: 'retry-${memo.id}',
+          content: memo.title,
+          type: _memoContentType(memo),
+          progress: _retryProgress,
+          stage: _retryStage,
+          statusText: _retryStatusText,
+          isCurrent: true,
+        ),
+      );
     }
 
     // Queued retries (waiting their turn)
     for (final memo in _retryQueue) {
-      items.add(QueueItemProgress(
-        id: 'retry-queued-${memo.id}',
-        content: memo.title,
-        type: _memoContentType(memo),
-        progress: 0.0,
-        stage: ProcessingStage.queued,
-        statusText: '대기 중',
-        isCurrent: false,
-      ));
+      items.add(
+        QueueItemProgress(
+          id: 'retry-queued-${memo.id}',
+          content: memo.title,
+          type: _memoContentType(memo),
+          progress: 0.0,
+          stage: ProcessingStage.queued,
+          statusText: '대기 중',
+          isCurrent: false,
+        ),
+      );
     }
     return items;
   }
@@ -532,8 +583,11 @@ class ContentProcessingService {
   /// Update the current item's stage/progress and emit immediately.
   /// Stage transitions are emitted at key processing milestones so the
   /// QueueScreen shows real-time progress (fetching → analyzing → saving).
-  void _updateProgress(ProcessingStage stage, String statusText,
-      {double? progress}) {
+  void _updateProgress(
+    ProcessingStage stage,
+    String statusText, {
+    double? progress,
+  }) {
     _currentStage = stage;
     _currentStatusText = statusText;
     _currentProgress = progress ?? stage.minProgress;
@@ -541,8 +595,11 @@ class ContentProcessingService {
   }
 
   /// Update the retry operation's stage/progress and emit immediately.
-  void _updateRetryProgress(ProcessingStage stage, String statusText,
-      {double? progress}) {
+  void _updateRetryProgress(
+    ProcessingStage stage,
+    String statusText, {
+    double? progress,
+  }) {
     if (_retryingMemo == null) return;
     _retryStage = stage;
     _retryStatusText = statusText;
@@ -557,11 +614,13 @@ class ContentProcessingService {
 
   /// Convenience: enqueue plain text for AI analysis.
   void enqueueText(String text, {String? fallbackTitle}) {
-    enqueue(ProcessingItem(
-      content: text,
-      type: ContentType.text,
-      fallbackTitle: fallbackTitle,
-    ));
+    enqueue(
+      ProcessingItem(
+        content: text,
+        type: ContentType.text,
+        fallbackTitle: fallbackTitle,
+      ),
+    );
   }
 
   Future<void> _processNext() async {
@@ -575,7 +634,10 @@ class ContentProcessingService {
       _currentItemId = _uuid.v4();
       _currentStage = ProcessingStage.fetchingContent;
       _currentProgress = ProcessingStage.fetchingContent.minProgress;
-      _currentStatusText = stageLabel(ProcessingStage.fetchingContent, item.type);
+      _currentStatusText = stageLabel(
+        ProcessingStage.fetchingContent,
+        item.type,
+      );
       _emitQueueState();
       await processItem(item, itemId: _currentItemId);
       // Clear current item and reset progress
@@ -618,8 +680,7 @@ class ContentProcessingService {
       return _saveFallback(url, '기타');
     }
 
-    final transcript =
-        await _youtubeService.fetchTranscript(videoId);
+    final transcript = await _youtubeService.fetchTranscript(videoId);
     final videoInfoWithTranscript = YouTubeVideoInfo(
       videoId: videoInfo.videoId,
       title: videoInfo.title,
@@ -632,8 +693,11 @@ class ContentProcessingService {
     final extractedContent = videoInfoWithTranscript.buildContentForAi();
 
     // Stage: analyzing — AI analysis
-    _updateProgress(ProcessingStage.analyzing, 'AI 요약 중',
-        progress: ProcessingStage.analyzing.minProgress);
+    _updateProgress(
+      ProcessingStage.analyzing,
+      'AI 요약 중',
+      progress: ProcessingStage.analyzing.minProgress,
+    );
 
     try {
       final result = await _aiService.analyzeContent(
@@ -646,19 +710,25 @@ class ContentProcessingService {
       _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty ? result.title : videoInfo.title;
-      final searchKeyword = result.address.isEmpty
-          ? extractSearchKeyword(result.content.isNotEmpty ? result.content : extractedContent)
-          : null;
-      await _insertMemo(Memo(
-        title: title,
-        content: result.content.isNotEmpty ? result.content : extractedContent,
-        category: result.category.isNotEmpty ? result.category : '기타',
-        address: result.address.isNotEmpty ? result.address : null,
-        searchKeyword: searchKeyword,
-        sourceUrl: url,
-        youtubeVideoId: videoId,
-        thumbnailUrl: videoInfo.thumbnailUrl,
-      ));
+      final searchKeyword =
+          result.address.isEmpty
+              ? extractSearchKeyword(
+                result.content.isNotEmpty ? result.content : extractedContent,
+              )
+              : null;
+      await _insertMemo(
+        Memo(
+          title: title,
+          content:
+              result.content.isNotEmpty ? result.content : extractedContent,
+          category: result.category.isNotEmpty ? result.category : '기타',
+          address: result.address.isNotEmpty ? result.address : null,
+          searchKeyword: searchKeyword,
+          sourceUrl: url,
+          youtubeVideoId: videoId,
+          thumbnailUrl: videoInfo.thumbnailUrl,
+        ),
+      );
       await _debug.log('CPS: YouTube memo saved');
       return title;
     } catch (e) {
@@ -666,15 +736,17 @@ class ContentProcessingService {
       await _debug.log('CPS: YouTube AI failed ($e), saving fallback');
       _updateProgress(ProcessingStage.saving, '저장 중');
       final fallbackKeyword = extractSearchKeyword(extractedContent);
-      await _insertMemo(Memo(
-        title: videoInfo.title,
-        content: extractedContent,
-        category: '기타',
-        searchKeyword: fallbackKeyword,
-        sourceUrl: url,
-        youtubeVideoId: videoId,
-        thumbnailUrl: videoInfo.thumbnailUrl,
-      ));
+      await _insertMemo(
+        Memo(
+          title: videoInfo.title,
+          content: extractedContent,
+          category: '기타',
+          searchKeyword: fallbackKeyword,
+          sourceUrl: url,
+          youtubeVideoId: videoId,
+          thumbnailUrl: videoInfo.thumbnailUrl,
+        ),
+      );
       return videoInfo.title;
     }
   }
@@ -692,8 +764,11 @@ class ContentProcessingService {
     final extractedContent = tiktokInfo.buildContentForAi();
 
     // Stage: analyzing — AI analysis
-    _updateProgress(ProcessingStage.analyzing, 'AI 요약 중',
-        progress: ProcessingStage.analyzing.minProgress);
+    _updateProgress(
+      ProcessingStage.analyzing,
+      'AI 요약 중',
+      progress: ProcessingStage.analyzing.minProgress,
+    );
 
     try {
       final result = await _aiService.analyzeContent(
@@ -705,18 +780,24 @@ class ContentProcessingService {
       _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty ? result.title : tiktokInfo.title;
-      final searchKeyword = result.address.isEmpty
-          ? extractSearchKeyword(result.content.isNotEmpty ? result.content : extractedContent)
-          : null;
-      await _insertMemo(Memo(
-        title: title,
-        content: result.content.isNotEmpty ? result.content : extractedContent,
-        category: result.category.isNotEmpty ? result.category : '기타',
-        address: result.address.isNotEmpty ? result.address : null,
-        searchKeyword: searchKeyword,
-        sourceUrl: url,
-        thumbnailUrl: tiktokInfo.thumbnailUrl,
-      ));
+      final searchKeyword =
+          result.address.isEmpty
+              ? extractSearchKeyword(
+                result.content.isNotEmpty ? result.content : extractedContent,
+              )
+              : null;
+      await _insertMemo(
+        Memo(
+          title: title,
+          content:
+              result.content.isNotEmpty ? result.content : extractedContent,
+          category: result.category.isNotEmpty ? result.category : '기타',
+          address: result.address.isNotEmpty ? result.address : null,
+          searchKeyword: searchKeyword,
+          sourceUrl: url,
+          thumbnailUrl: tiktokInfo.thumbnailUrl,
+        ),
+      );
       await _debug.log('CPS: TikTok memo saved');
       return title;
     } catch (e) {
@@ -736,19 +817,22 @@ class ContentProcessingService {
         }
       }
 
-      final fallbackKeyword = fallbackAddress == null
-          ? extractSearchKeyword(extractedContent)
-          : null;
+      final fallbackKeyword =
+          fallbackAddress == null
+              ? extractSearchKeyword(extractedContent)
+              : null;
 
-      await _insertMemo(Memo(
-        title: tiktokInfo.title,
-        content: extractedContent,
-        category: '기타',
-        address: fallbackAddress,
-        searchKeyword: fallbackKeyword,
-        sourceUrl: url,
-        thumbnailUrl: tiktokInfo.thumbnailUrl,
-      ));
+      await _insertMemo(
+        Memo(
+          title: tiktokInfo.title,
+          content: extractedContent,
+          category: '기타',
+          address: fallbackAddress,
+          searchKeyword: fallbackKeyword,
+          sourceUrl: url,
+          thumbnailUrl: tiktokInfo.thumbnailUrl,
+        ),
+      );
       return tiktokInfo.title;
     }
   }
@@ -765,18 +849,22 @@ class ContentProcessingService {
     final pageInfo = await _webPageService.fetchPageContent(url);
     if (pageInfo != null && pageInfo.textContent.isNotEmpty) {
       pageTitle = pageInfo.title;
-      extractedContent = '웹페이지 제목: ${pageInfo.title}\n'
+      extractedContent =
+          '웹페이지 제목: ${pageInfo.title}\n'
           '설명: ${pageInfo.description}\n'
           '본문 내용:\n${pageInfo.textContent}';
     } else {
       // Fallback HTTP fetch
       try {
         final response = await http
-            .get(Uri.parse(url), headers: {
-              'User-Agent':
-                  'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-              'Accept-Language': 'ko-KR,ko;q=0.9',
-            })
+            .get(
+              Uri.parse(url),
+              headers: {
+                'User-Agent':
+                    'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+                'Accept-Language': 'ko-KR,ko;q=0.9',
+              },
+            )
             .timeout(const Duration(seconds: 15));
 
         if (response.statusCode == 200) {
@@ -795,9 +883,10 @@ class ContentProcessingService {
 
           if (title.isNotEmpty || desc.isNotEmpty) {
             pageTitle = title;
-            extractedContent = [if (title.isNotEmpty) '[$title]', desc]
-                .where((s) => s.isNotEmpty)
-                .join(' ');
+            extractedContent = [
+              if (title.isNotEmpty) '[$title]',
+              desc,
+            ].where((s) => s.isNotEmpty).join(' ');
           }
         }
       } catch (_) {}
@@ -808,13 +897,17 @@ class ContentProcessingService {
     }
 
     final finalTitle = pageTitle ?? url;
-    final aiContent = extractedContent.length > 3000
-        ? '${extractedContent.substring(0, 3000)}\n\n[...이하 생략...]'
-        : extractedContent;
+    final aiContent =
+        extractedContent.length > 3000
+            ? '${extractedContent.substring(0, 3000)}\n\n[...이하 생략...]'
+            : extractedContent;
 
     // Stage: analyzing — AI analysis
-    _updateProgress(ProcessingStage.analyzing, 'AI 요약 중',
-        progress: ProcessingStage.analyzing.minProgress);
+    _updateProgress(
+      ProcessingStage.analyzing,
+      'AI 요약 중',
+      progress: ProcessingStage.analyzing.minProgress,
+    );
 
     try {
       final result = await _aiService.analyzeContent(
@@ -822,15 +915,18 @@ class ContentProcessingService {
         sourceUrl: url,
       );
 
-      var finalContent = result.content.isNotEmpty ? result.content : extractedContent;
+      var finalContent =
+          result.content.isNotEmpty ? result.content : extractedContent;
       var finalCategory = result.category.isNotEmpty ? result.category : '기타';
 
       // Check for AI echo
-      if (result.content.isEmpty || result.content.length > aiContent.length * 0.8) {
+      if (result.content.isEmpty ||
+          result.content.length > aiContent.length * 0.8) {
         await _debug.log('CPS: AI likely echoed input');
-        finalContent = extractedContent.length > 500
-            ? '${extractedContent.substring(0, 500)}\n\n📌 AI 요약에 실패했습니다. 원본 내용 중 일부를 표시합니다.'
-            : extractedContent;
+        finalContent =
+            extractedContent.length > 500
+                ? '${extractedContent.substring(0, 500)}\n\n📌 AI 요약에 실패했습니다. 원본 내용 중 일부를 표시합니다.'
+                : extractedContent;
         if (finalCategory == '기타' || finalCategory.isEmpty) {
           final detected = CategoryDetector.detect(extractedContent);
           if (detected != null) finalCategory = detected;
@@ -841,34 +937,42 @@ class ContentProcessingService {
       _updateProgress(ProcessingStage.saving, '저장 중');
 
       final title = result.title.isNotEmpty ? result.title : finalTitle;
-      final searchKeyword = result.address.isEmpty
-          ? extractSearchKeyword(result.content.isNotEmpty ? result.content : extractedContent)
-          : null;
-      await _insertMemo(Memo(
-        title: title,
-        content: finalContent,
-        category: finalCategory,
-        address: result.address.isNotEmpty ? result.address : null,
-        searchKeyword: searchKeyword,
-        sourceUrl: url,
-      ));
+      final searchKeyword =
+          result.address.isEmpty
+              ? extractSearchKeyword(
+                result.content.isNotEmpty ? result.content : extractedContent,
+              )
+              : null;
+      await _insertMemo(
+        Memo(
+          title: title,
+          content: finalContent,
+          category: finalCategory,
+          address: result.address.isNotEmpty ? result.address : null,
+          searchKeyword: searchKeyword,
+          sourceUrl: url,
+        ),
+      );
       await _debug.log('CPS: Web memo saved');
       return title;
     } catch (e) {
       await _debug.log('CPS: Web AI failed ($e), saving fallback');
       _updateProgress(ProcessingStage.saving, '저장 중');
       final detected = CategoryDetector.detect(extractedContent);
-      final truncated = extractedContent.length > 500
-          ? '${extractedContent.substring(0, 500)}\n\n📌 AI 요약에 실패했습니다.'
-          : extractedContent;
+      final truncated =
+          extractedContent.length > 500
+              ? '${extractedContent.substring(0, 500)}\n\n📌 AI 요약에 실패했습니다.'
+              : extractedContent;
       final fallbackKeyword = extractSearchKeyword(extractedContent);
-      await _insertMemo(Memo(
-        title: finalTitle,
-        content: truncated,
-        category: detected ?? '기타',
-        searchKeyword: fallbackKeyword,
-        sourceUrl: url,
-      ));
+      await _insertMemo(
+        Memo(
+          title: finalTitle,
+          content: truncated,
+          category: detected ?? '기타',
+          searchKeyword: fallbackKeyword,
+          sourceUrl: url,
+        ),
+      );
       return finalTitle;
     }
   }
@@ -884,12 +988,14 @@ class ContentProcessingService {
     if (!await _llmService.isAvailable()) {
       // No AI — save raw
       final fallbackKeyword = extractSearchKeyword(content);
-      await _insertMemo(Memo(
-        title: item.fallbackTitle ?? '메모',
-        content: content,
-        category: item.fallbackCategory ?? '기타',
-        searchKeyword: fallbackKeyword,
-      ));
+      await _insertMemo(
+        Memo(
+          title: item.fallbackTitle ?? '메모',
+          content: content,
+          category: item.fallbackCategory ?? '기타',
+          searchKeyword: fallbackKeyword,
+        ),
+      );
       return item.fallbackTitle ?? '메모';
     }
 
@@ -902,31 +1008,39 @@ class ContentProcessingService {
       // Stage: saving — persist to DB
       _updateProgress(ProcessingStage.saving, '저장 중');
 
-      final title = result.title.isNotEmpty
-          ? result.title
-          : item.fallbackTitle ?? '제목 없음';
-      final searchKeyword = result.address.isEmpty
-          ? extractSearchKeyword(result.content.isNotEmpty ? result.content : content)
-          : null;
-      await _insertMemo(Memo(
-        title: title,
-        content: result.content.isNotEmpty ? result.content : content,
-        category: result.category.isNotEmpty ? result.category : '기타',
-        address: result.address.isNotEmpty ? result.address : null,
-        searchKeyword: searchKeyword,
-      ));
+      final title =
+          result.title.isNotEmpty
+              ? result.title
+              : item.fallbackTitle ?? '제목 없음';
+      final searchKeyword =
+          result.address.isEmpty
+              ? extractSearchKeyword(
+                result.content.isNotEmpty ? result.content : content,
+              )
+              : null;
+      await _insertMemo(
+        Memo(
+          title: title,
+          content: result.content.isNotEmpty ? result.content : content,
+          category: result.category.isNotEmpty ? result.category : '기타',
+          address: result.address.isNotEmpty ? result.address : null,
+          searchKeyword: searchKeyword,
+        ),
+      );
       await _debug.log('CPS: Text memo saved via AI');
       return title;
     } catch (e) {
       await _debug.log('CPS: Text AI failed ($e), saving raw');
       _updateProgress(ProcessingStage.saving, '저장 중');
       final fallbackKeyword = extractSearchKeyword(content);
-      await _insertMemo(Memo(
-        title: item.fallbackTitle ?? '메모',
-        content: content,
-        category: item.fallbackCategory ?? '기타',
-        searchKeyword: fallbackKeyword,
-      ));
+      await _insertMemo(
+        Memo(
+          title: item.fallbackTitle ?? '메모',
+          content: content,
+          category: item.fallbackCategory ?? '기타',
+          searchKeyword: fallbackKeyword,
+        ),
+      );
       return item.fallbackTitle ?? '메모';
     }
   }
@@ -951,23 +1065,31 @@ class ContentProcessingService {
         // Stage: analyzing — AI analysis
         _updateProgress(ProcessingStage.analyzing, 'AI 요약 중');
         try {
-          final result = await _aiService.analyzeContent(content: ocrResult.text!);
+          final result = await _aiService.analyzeContent(
+            content: ocrResult.text!,
+          );
           // Stage: saving — persist to DB
           _updateProgress(ProcessingStage.saving, '저장 중');
-          final title = result.title.isNotEmpty
-              ? result.title
-              : '이미지 메모';
-          final searchKeyword = result.address.isEmpty
-              ? extractSearchKeyword(result.content.isNotEmpty ? result.content : ocrResult.text!)
-              : null;
-          await _insertMemo(Memo(
-            title: title,
-            content: result.content.isNotEmpty ? result.content : ocrResult.text!,
-            category: result.category.isNotEmpty ? result.category : '기타',
-            address: result.address.isNotEmpty ? result.address : null,
-            searchKeyword: searchKeyword,
-            imagePath: localImagePath,
-          ));
+          final title = result.title.isNotEmpty ? result.title : '이미지 메모';
+          final searchKeyword =
+              result.address.isEmpty
+                  ? extractSearchKeyword(
+                    result.content.isNotEmpty
+                        ? result.content
+                        : ocrResult.text!,
+                  )
+                  : null;
+          await _insertMemo(
+            Memo(
+              title: title,
+              content:
+                  result.content.isNotEmpty ? result.content : ocrResult.text!,
+              category: result.category.isNotEmpty ? result.category : '기타',
+              address: result.address.isNotEmpty ? result.address : null,
+              searchKeyword: searchKeyword,
+              imagePath: localImagePath,
+            ),
+          );
           await _debug.log('CPS: Image OCR memo saved via AI');
           return title;
         } catch (e) {
@@ -977,25 +1099,42 @@ class ContentProcessingService {
 
       _updateProgress(ProcessingStage.saving, '저장 중');
       final ocrFallbackKeyword = extractSearchKeyword(ocrResult.text!);
-      await _insertMemo(Memo(
-        title: '이미지 메모',
-        content: ocrResult.text!,
-        category: '기타',
-        searchKeyword: ocrFallbackKeyword,
-        imagePath: localImagePath,
-      ));
+      await _insertMemo(
+        Memo(
+          title: '이미지 메모',
+          content: ocrResult.text!,
+          category: '기타',
+          searchKeyword: ocrFallbackKeyword,
+          imagePath: localImagePath,
+        ),
+      );
       return '이미지 메모';
     }
 
     await _debug.log('CPS: No text found in image');
     _updateProgress(ProcessingStage.saving, '저장 중');
-    await _insertMemo(Memo(
-      title: '이미지 메모',
-      content: '📷 이미지가 공유되었습니다.\n\n이 이미지에서 인식된 텍스트가 없습니다.',
-      category: '기타',
-      imagePath: localImagePath,
-    ));
+    await _insertMemo(
+      Memo(
+        title: '이미지 메모',
+        content: '📷 이미지가 공유되었습니다.\n\n이 이미지에서 인식된 텍스트가 없습니다.',
+        category: '기타',
+        imagePath: localImagePath,
+      ),
+    );
     return '이미지 메모';
+  }
+
+  /// Supabase 동기화 예약 — fire-and-forget.
+  ///
+  /// 메모 저장이 끝난 뒤 호출되며, 동기화 실패/예외가 절대 메모 저장 결과를
+  /// 실패로 바꾸지 않도록 모든 예외를 삼킨다.
+  /// (비로그인 또는 Supabase 미초기화 환경에서는 내부적으로 no-op)
+  void _syncMemo(Memo memo) {
+    try {
+      _syncService.debouncePushMemo(memo);
+    } catch (e) {
+      unawaited(_debug.log('CPS: Sync push 예약 실패 (무시): $e'));
+    }
   }
 
   Future<String> _saveFallback(String url, String category) async {
@@ -1008,8 +1147,7 @@ class ContentProcessingService {
     final id = await _databaseService.insertMemo(memo);
     final saved = memo.copyWith(id: id);
     await _tryGeocode(saved);
-    // Supabase 동기화 (비로그인 시 no-op)
-    _syncService.debouncePushMemo(saved);
+    _syncMemo(saved);
     return url;
   }
 
@@ -1024,8 +1162,7 @@ class ContentProcessingService {
     final id = await _databaseService.insertMemo(memo);
     final saved = memo.copyWith(id: id);
     await _tryGeocode(saved);
-    // Supabase 동기화 (비로그인 시 no-op)
-    _syncService.debouncePushMemo(saved);
+    _syncMemo(saved);
     return id;
   }
 
@@ -1036,8 +1173,7 @@ class ContentProcessingService {
     if (!memo.hasCoordinates) {
       await _tryGeocode(memo);
     }
-    // Supabase 동기화 (비로그인 시 no-op)
-    _syncService.debouncePushMemo(memo);
+    _syncMemo(memo);
   }
 
   /// Regex to match Korean road address patterns (도로명 주소).
@@ -1066,7 +1202,7 @@ class ContentProcessingService {
   /// Examples: "신림 맛집", "강남역 카페", "판교 돈까스"
   static final RegExp searchKeywordPattern = RegExp(
     r'([가-힣]{2,}(?:역|입구|사거리|오거리)?)\s*'
-    r'(맛집|카페|식당|음식점|술집|호프|주점|바|펍|찻집|제과점|빵집|분식|치킨|피자|국수|냉면|돈까스|초밥|구이|찜|탕|찌개|볶음|전|족발|닭발|파스타|샐러드|버거|샌드위치|떡볶이|순대|만두|고기|해산물|회|포장마차|포차|맛집)'
+    r'(맛집|카페|식당|음식점|술집|호프|주점|바|펍|찻집|제과점|빵집|분식|치킨|피자|국수|냉면|돈까스|초밥|구이|찜|탕|찌개|볶음|전|족발|닭발|파스타|샐러드|버거|샌드위치|떡볶이|순대|만두|고기|해산물|회|포장마차|포차|맛집)',
   );
 
   /// Extract a map search keyword ("[region] [business type]") when no address
@@ -1089,7 +1225,9 @@ class ContentProcessingService {
   Future<void> _tryGeocode(Memo memo) async {
     // Skip if already has coordinates
     if (memo.hasCoordinates) {
-      await _debug.log('Geocode: memo id=${memo.id} already has coordinates, skipping');
+      await _debug.log(
+        'Geocode: memo id=${memo.id} already has coordinates, skipping',
+      );
       return;
     }
 
@@ -1097,7 +1235,9 @@ class ContentProcessingService {
 
     // PRIORITY 1: Use the stored address from AI analysis (most reliable)
     if (memo.hasAddress) {
-      await _debug.log('Geocode: Using stored address from AI for memo id=${memo.id}: "${memo.address}"');
+      await _debug.log(
+        'Geocode: Using stored address from AI for memo id=${memo.id}: "${memo.address}"',
+      );
       geoResult = await GeocodingService().searchAddress(memo.address!);
     }
 
@@ -1110,7 +1250,9 @@ class ContentProcessingService {
       final roadMatch = _roadAddressPattern.firstMatch(searchText);
       if (roadMatch != null) {
         foundAddress = roadMatch.group(0)!.trim();
-        await _debug.log('Geocode: Found road address via regex in memo id=${memo.id}: "$foundAddress"');
+        await _debug.log(
+          'Geocode: Found road address via regex in memo id=${memo.id}: "$foundAddress"',
+        );
         geoResult = await GeocodingService().searchAddress(foundAddress);
       }
 
@@ -1119,7 +1261,9 @@ class ContentProcessingService {
         final landMatch = _landAddressPattern.firstMatch(searchText);
         if (landMatch != null) {
           foundAddress = landMatch.group(0)!.trim();
-          await _debug.log('Geocode: Found land address via regex in memo id=${memo.id}: "$foundAddress"');
+          await _debug.log(
+            'Geocode: Found land address via regex in memo id=${memo.id}: "$foundAddress"',
+          );
           geoResult = await GeocodingService().searchAddress(foundAddress);
         }
       }
@@ -1127,12 +1271,16 @@ class ContentProcessingService {
 
     // PRIORITY 3: Use search keyword → Kakao keyword search
     if (geoResult == null && memo.hasSearchKeyword) {
-      await _debug.log('Geocode: Using search keyword for memo id=${memo.id}: "${memo.searchKeyword}"');
+      await _debug.log(
+        'Geocode: Using search keyword for memo id=${memo.id}: "${memo.searchKeyword}"',
+      );
       geoResult = await GeocodingService().searchKeyword(memo.searchKeyword!);
     }
 
     if (geoResult == null) {
-      await _debug.log('Geocode: No address or keyword found for memo id=${memo.id}');
+      await _debug.log(
+        'Geocode: No address or keyword found for memo id=${memo.id}',
+      );
       return;
     }
 
@@ -1218,10 +1366,9 @@ class ContentProcessingService {
       unawaited(_retryFromHistoryWithMemo(historyItem));
     } else {
       // No memoId — enqueue as fresh item
-      enqueue(ProcessingItem(
-        content: historyItem.content,
-        type: historyItem.type,
-      ));
+      enqueue(
+        ProcessingItem(content: historyItem.content, type: historyItem.type),
+      );
     }
   }
 
@@ -1246,7 +1393,8 @@ class ContentProcessingService {
       Memo? updated;
       if (memo.youtubeVideoId != null && memo.sourceUrl != null) {
         updated = await _retryYouTube(memo, memo.sourceUrl!);
-      } else if (memo.sourceUrl != null && _tiktokService.isTikTokUrl(memo.sourceUrl!)) {
+      } else if (memo.sourceUrl != null &&
+          _tiktokService.isTikTokUrl(memo.sourceUrl!)) {
         updated = await _retryTikTok(memo, memo.sourceUrl!);
       } else if (memo.sourceUrl != null) {
         updated = await _retryUrl(memo, memo.sourceUrl!);
@@ -1263,10 +1411,9 @@ class ContentProcessingService {
       );
 
       if (updated != null && !_resultController.isClosed) {
-        _resultController.add(ProcessingResult(
-          success: true,
-          title: updated.title,
-        ));
+        _resultController.add(
+          ProcessingResult(success: true, title: updated.title),
+        );
       }
     } catch (e, stack) {
       // If the user explicitly cancelled, skip saving (cancelCurrentItem
@@ -1275,10 +1422,9 @@ class ContentProcessingService {
         _userCancelled = false;
         await _debug.log('CPS: Retry cancelled by user');
         if (!_resultController.isClosed) {
-          _resultController.add(ProcessingResult(
-            success: false,
-            error: '사용자가 처리를 취소했습니다.',
-          ));
+          _resultController.add(
+            ProcessingResult(success: false, error: '사용자가 처리를 취소했습니다.'),
+          );
         }
       } else {
         await _debug.log('CPS: Retry failed: $e\n$stack');
@@ -1290,10 +1436,9 @@ class ContentProcessingService {
         );
 
         if (!_resultController.isClosed) {
-          _resultController.add(ProcessingResult(
-            success: false,
-            error: e.toString(),
-          ));
+          _resultController.add(
+            ProcessingResult(success: false, error: e.toString()),
+          );
         }
       }
     } finally {
@@ -1325,8 +1470,11 @@ class ContentProcessingService {
     final extractedContent = videoInfoWithTranscript.buildContentForAi();
 
     // Stage: analyzing — AI analysis
-    _updateRetryProgress(ProcessingStage.analyzing, 'AI 재요약 중',
-        progress: ProcessingStage.analyzing.minProgress);
+    _updateRetryProgress(
+      ProcessingStage.analyzing,
+      'AI 재요약 중',
+      progress: ProcessingStage.analyzing.minProgress,
+    );
 
     final result = await _aiService.analyzeContent(
       content: extractedContent,
@@ -1360,7 +1508,8 @@ class ContentProcessingService {
     final pageInfo = await _webPageService.fetchPageContent(url);
     if (pageInfo != null && pageInfo.textContent.isNotEmpty) {
       pageTitle = pageInfo.title;
-      extractedContent = '웹페이지 제목: ${pageInfo.title}\n'
+      extractedContent =
+          '웹페이지 제목: ${pageInfo.title}\n'
           '설명: ${pageInfo.description}\n'
           '본문 내용:\n${pageInfo.textContent}';
     }
@@ -1370,26 +1519,33 @@ class ContentProcessingService {
       return _retryText(memo);
     }
 
-    final aiContent = extractedContent.length > 3000
-        ? '${extractedContent.substring(0, 3000)}\n\n[...이하 생략...]'
-        : extractedContent;
+    final aiContent =
+        extractedContent.length > 3000
+            ? '${extractedContent.substring(0, 3000)}\n\n[...이하 생략...]'
+            : extractedContent;
 
     // Stage: analyzing — AI analysis
-    _updateRetryProgress(ProcessingStage.analyzing, 'AI 재요약 중',
-        progress: ProcessingStage.analyzing.minProgress);
+    _updateRetryProgress(
+      ProcessingStage.analyzing,
+      'AI 재요약 중',
+      progress: ProcessingStage.analyzing.minProgress,
+    );
 
     final result = await _aiService.analyzeContent(
       content: aiContent,
       sourceUrl: url,
     );
 
-    var finalContent = result.content.isNotEmpty ? result.content : extractedContent;
+    var finalContent =
+        result.content.isNotEmpty ? result.content : extractedContent;
     var finalCategory = result.category.isNotEmpty ? result.category : '기타';
 
-    if (result.content.isEmpty || result.content.length > aiContent.length * 0.8) {
-      finalContent = extractedContent.length > 500
-          ? '${extractedContent.substring(0, 500)}\n\n📌 AI 요약에 실패했습니다. 원본 내용 중 일부를 표시합니다.'
-          : extractedContent;
+    if (result.content.isEmpty ||
+        result.content.length > aiContent.length * 0.8) {
+      finalContent =
+          extractedContent.length > 500
+              ? '${extractedContent.substring(0, 500)}\n\n📌 AI 요약에 실패했습니다. 원본 내용 중 일부를 표시합니다.'
+              : extractedContent;
       if (finalCategory == '기타') {
         final detected = CategoryDetector.detect(extractedContent);
         if (detected != null) finalCategory = detected;
@@ -1424,8 +1580,11 @@ class ContentProcessingService {
     final extractedContent = tiktokInfo.buildContentForAi();
 
     // Stage: analyzing — AI analysis
-    _updateRetryProgress(ProcessingStage.analyzing, 'AI 재요약 중',
-        progress: ProcessingStage.analyzing.minProgress);
+    _updateRetryProgress(
+      ProcessingStage.analyzing,
+      'AI 재요약 중',
+      progress: ProcessingStage.analyzing.minProgress,
+    );
 
     try {
       final result = await _aiService.analyzeContent(
@@ -1439,13 +1598,9 @@ class ContentProcessingService {
       final title = result.title.isNotEmpty ? result.title : tiktokInfo.title;
       final updated = memo.copyWith(
         title: title,
-        content: result.content.isNotEmpty
-            ? result.content
-            : extractedContent,
+        content: result.content.isNotEmpty ? result.content : extractedContent,
         category: result.category.isNotEmpty ? result.category : memo.category,
-        address: result.address.isNotEmpty
-            ? result.address
-            : memo.address,
+        address: result.address.isNotEmpty ? result.address : memo.address,
         thumbnailUrl: tiktokInfo.thumbnailUrl,
         updatedAt: DateTime.now(),
       );
@@ -1534,8 +1689,8 @@ class ContentProcessingService {
         address: result.address.isNotEmpty ? result.address : memo.address,
         updatedAt: DateTime.now(),
       );
-    await _updateMemo(updated);
-    return updated;
+      await _updateMemo(updated);
+      return updated;
     }
 
     return memo;

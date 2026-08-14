@@ -50,9 +50,7 @@ void main() async {
 
   // Initialize flutter_gemma for on-device LLM inference
   // Register LiteRT-LM engine for .litertlm model support
-  await FlutterGemma.initialize(
-    inferenceEngines: [LiteRtLmEngine()],
-  );
+  await FlutterGemma.initialize(inferenceEngines: [LiteRtLmEngine()]);
 
   // Initialize database
   final databaseService = DatabaseService();
@@ -76,7 +74,9 @@ void main() async {
 
   // Naver Client Secret
   if (await secureStorage.getNaverClientSecret() == null) {
-    await secureStorage.saveNaverClientSecret('aNPC4VRfpV8tSgSMI7OtYMwRCfOrNhya6qhRaMQP');
+    await secureStorage.saveNaverClientSecret(
+      'aNPC4VRfpV8tSgSMI7OtYMwRCfOrNhya6qhRaMQP',
+    );
   }
 
   runApp(const AimemoApp());
@@ -89,8 +89,11 @@ Future<void> backgroundMain() async {
   // ---------------------------------------------------------------------------
   // 1. 초기화 — 각 단계 실패 시 AI 없이 fallback 저장 모드로 진행
   // ---------------------------------------------------------------------------
+
+  // 백그라운드 isolate 시작 로그 — 서비스가 실제로 진입했는지 확인 용도
   try {
     await DebugLogger().init();
+    await DebugLogger().log('backgroundMain: isolate 시작됨');
   } catch (_) {}
 
   var aiAvailable = true;
@@ -98,9 +101,7 @@ Future<void> backgroundMain() async {
   // FlutterGemma: on-device AI 엔진. secondary engine에서 실패할 수 있으므로
   // 실패해도 치명적이지 않음 — AI 없이 원본 저장만 하면 됨.
   try {
-    await FlutterGemma.initialize(
-      inferenceEngines: [LiteRtLmEngine()],
-    );
+    await FlutterGemma.initialize(inferenceEngines: [LiteRtLmEngine()]);
   } catch (e) {
     // ignore: avoid_print
     print('[backgroundMain] FlutterGemma 초기화 실패 (AI 없이 진행): $e');
@@ -128,16 +129,41 @@ Future<void> backgroundMain() async {
   // 2. 큐에 쌓인 아이템을 순차 처리
   // ---------------------------------------------------------------------------
   final queue = BackgroundQueueService();
-  final processor = ContentProcessingService();
+
+  // ContentProcessingService는 내부적으로 SyncService(지연 초기화)를 참조한다.
+  // 백그라운드 isolate에서는 Supabase.initialize()가 호출되지 않으므로,
+  // 생성 실패에 대비해 try-catch로 감싼다. (실패 시 처리를 포기하고 종료)
+  ContentProcessingService processor;
+  try {
+    processor = ContentProcessingService();
+  } catch (e) {
+    // ignore: avoid_print
+    print('[backgroundMain] ContentProcessingService 초기화 실패 — 종료: $e');
+    try {
+      await DebugLogger().log(
+        'backgroundMain: ContentProcessingService 초기화 실패 $e',
+      );
+    } catch (_) {}
+    return;
+  }
 
   try {
     while (true) {
       final items = await queue.getPendingItems();
-      if (items.isEmpty) break;
+      if (items.isEmpty) {
+        await DebugLogger().log('backgroundMain: 큐 비어있음 — 종료');
+        break;
+      }
+
+      await DebugLogger().log('backgroundMain: ${items.length}건 처리 시작');
 
       for (final item in items) {
         // 각 아이템을 개별 try-catch로 감싸서 한 건 실패해도 나머지 계속 처리
         try {
+          await DebugLogger().log(
+            'backgroundMain: 처리 시작 id=${item.id} type=${item.type} content=${item.content.length > 50 ? item.content.substring(0, 50) + "..." : item.content}',
+          );
+
           final contentType = switch (item.type) {
             BackgroundQueueType.url => ContentType.url,
             BackgroundQueueType.image => ContentType.image,
@@ -150,13 +176,36 @@ Future<void> backgroundMain() async {
             BackgroundQueueType.url => null,
           };
 
-          final result = await processor.processItem(
-            ProcessingItem(
-              content: item.content,
-              type: contentType,
-              fallbackTitle: fallbackTitle,
-            ),
-          );
+          // 안전장치: processItem이 영원히 return하지 않는 경우(hang)를 방지.
+          // 3분 내에 처리가 끝나지 않으면 강제로 큐에서 제거하고 알림.
+          // (on-device LLM이 응답하지 않거나 network fetch가 hang하는 경우)
+          ProcessingResult result;
+          try {
+            result = await processor
+                .processItem(
+                  ProcessingItem(
+                    content: item.content,
+                    type: contentType,
+                    fallbackTitle: fallbackTitle,
+                  ),
+                )
+                .timeout(const Duration(minutes: 3));
+            await DebugLogger().log(
+              'backgroundMain: 처리 완료 id=${item.id} success=${result.success}',
+            );
+          } catch (e) {
+            // timeout 또는 예외 — 처리 실패로 간주하고 큐에서 강제 제거
+            await DebugLogger().log(
+              'backgroundMain: 처리 실패 id=${item.id} error=$e',
+            );
+            await queue.removeById(item.id);
+            await queue.notifyComplete(
+              title: item.content,
+              success: false,
+              error: '처리 시간 초과 또는 오류: $e',
+            );
+            continue;
+          }
 
           await queue.markComplete(item.id);
           await queue.notifyComplete(
@@ -166,7 +215,8 @@ Future<void> backgroundMain() async {
           );
         } catch (e) {
           // processor.processItem() 자체가 예상치 못하게 던진 경우
-          await queue.markComplete(item.id);
+          await DebugLogger().log('backgroundMain: 예외 id=${item.id} error=$e');
+          await queue.removeById(item.id);
           await queue.notifyComplete(
             title: item.content,
             success: false,
@@ -179,7 +229,11 @@ Future<void> backgroundMain() async {
     // while/for 루프 자체가 깨진 경우 — 최소한 알림이라도 전송
     // ignore: avoid_print
     print('[backgroundMain] 처리 루프 중단: $e');
+    try {
+      await DebugLogger().log('backgroundMain: 루프 중단 $e');
+    } catch (_) {}
   } finally {
+    await DebugLogger().log('backgroundMain: 종료 — stopServiceIfIdle 호출');
     await queue.stopServiceIfIdle();
   }
 }
@@ -234,9 +288,7 @@ class _MainShellState extends State<MainShell> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (context) => _MoreSheet(
-        onSelect: _selectMoreMenu,
-      ),
+      builder: (context) => _MoreSheet(onSelect: _selectMoreMenu),
     );
   }
 
@@ -253,14 +305,14 @@ class _MainShellState extends State<MainShell> {
       body: IndexedStack(
         index: _currentIndex,
         children: const [
-          HomeScreen(),          // 0: 메모
-          QueueScreen(),         // 1: 처리현황
-          ChatScreen(),          // 2: AI 챗봇
-          MapScreen(),           // 3: 지도
+          HomeScreen(), // 0: 메모
+          QueueScreen(), // 1: 처리현황
+          ChatScreen(), // 2: AI 챗봇
+          MapScreen(), // 3: 지도
           ReadingDashboardScreen(), // 4: 독서 기록
-          ReadingCalendarScreen(),  // 5: 독서 달력
-          SyncHistoryScreen(),       // 6: 동기화 이력
-          SettingsScreen(),         // 7: 설정
+          ReadingCalendarScreen(), // 5: 독서 달력
+          SyncHistoryScreen(), // 6: 동기화 이력
+          SettingsScreen(), // 7: 설정
         ],
       ),
       bottomNavigationBar: SafeArea(
@@ -393,94 +445,78 @@ class AimemoApp extends StatelessWidget {
     return ChangeNotifierProvider(
       create: (_) => AuthService(),
       child: MaterialApp(
-      title: 'Aimemo',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF1565C0),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-        fontFamily: 'Roboto',
-        appBarTheme: const AppBarTheme(
-          centerTitle: true,
-          elevation: 0,
-        ),
-        cardTheme: CardThemeData(
-          elevation: 1,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+        title: 'Aimemo',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: const Color(0xFF1565C0),
+            brightness: Brightness.light,
           ),
-        ),
-        filledButtonTheme: FilledButtonThemeData(
-          style: FilledButton.styleFrom(
+          useMaterial3: true,
+          fontFamily: 'Roboto',
+          appBarTheme: const AppBarTheme(centerTitle: true, elevation: 0),
+          cardTheme: CardThemeData(
+            elevation: 1,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+          filledButtonTheme: FilledButtonThemeData(
+            style: FilledButton.styleFrom(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+          ),
+          inputDecorationTheme: InputDecorationTheme(
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 12,
             ),
           ),
         ),
-        inputDecorationTheme: InputDecorationTheme(
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(8),
-          ),
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
-            vertical: 12,
-          ),
-        ),
-      ),
-      initialRoute: '/',
-      onGenerateRoute: (settings) {
-        // Handle named routes and arguments
-        switch (settings.name) {
-          case '/':
-            return MaterialPageRoute(
-              builder: (_) => const MainShell(),
-            );
-          case '/settings':
-            return MaterialPageRoute(
-              builder: (_) => const SettingsScreen(),
-            );
-          case '/memo-input':
-            final args = settings.arguments as Map<String, dynamic>?;
-            return MaterialPageRoute(
-              builder: (_) => MemoInputScreen(
-                initialUrl: args?['url'] as String?,
-                initialContent: args?['content'] as String?,
-                youtubeVideoId: args?['youtubeVideoId'] as String?,
-              ),
-            );
-          case '/memo-detail':
-            final args = settings.arguments as Map<String, dynamic>;
-            return MaterialPageRoute(
-              builder: (_) => MemoDetailScreen(
-                memoId: args['memoId'] as int,
-              ),
-            );
-          case '/memo-map':
-            final args = settings.arguments as Map<String, dynamic>;
-            return MaterialPageRoute(
-              builder: (_) => MemoMapScreen(
-                memoId: args['memoId'] as int,
-              ),
-            );
-          case '/chat':
-            return MaterialPageRoute(
-              builder: (_) => const ChatScreen(),
-            );
-          case '/url-processing':
-            final args = settings.arguments as Map<String, dynamic>;
-            return MaterialPageRoute(
-              builder: (_) => UrlProcessingScreen(
-                sharedUrl: args['url'] as String,
-              ),
-            );
-          default:
-            return MaterialPageRoute(
-              builder: (_) => const MainShell(),
-            );
-        }
-      },
+        initialRoute: '/',
+        onGenerateRoute: (settings) {
+          // Handle named routes and arguments
+          switch (settings.name) {
+            case '/':
+              return MaterialPageRoute(builder: (_) => const MainShell());
+            case '/settings':
+              return MaterialPageRoute(builder: (_) => const SettingsScreen());
+            case '/memo-input':
+              final args = settings.arguments as Map<String, dynamic>?;
+              return MaterialPageRoute(
+                builder:
+                    (_) => MemoInputScreen(
+                      initialUrl: args?['url'] as String?,
+                      initialContent: args?['content'] as String?,
+                      youtubeVideoId: args?['youtubeVideoId'] as String?,
+                    ),
+              );
+            case '/memo-detail':
+              final args = settings.arguments as Map<String, dynamic>;
+              return MaterialPageRoute(
+                builder: (_) => MemoDetailScreen(memoId: args['memoId'] as int),
+              );
+            case '/memo-map':
+              final args = settings.arguments as Map<String, dynamic>;
+              return MaterialPageRoute(
+                builder: (_) => MemoMapScreen(memoId: args['memoId'] as int),
+              );
+            case '/chat':
+              return MaterialPageRoute(builder: (_) => const ChatScreen());
+            case '/url-processing':
+              final args = settings.arguments as Map<String, dynamic>;
+              return MaterialPageRoute(
+                builder:
+                    (_) =>
+                        UrlProcessingScreen(sharedUrl: args['url'] as String),
+              );
+            default:
+              return MaterialPageRoute(builder: (_) => const MainShell());
+          }
+        },
       ),
     );
   }

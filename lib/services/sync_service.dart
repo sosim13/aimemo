@@ -29,9 +29,34 @@ class SyncService {
   factory SyncService() => _instance;
   SyncService._internal();
 
-  final _client = Supabase.instance.client;
   final _db = DatabaseService();
-  final _thumbnail = ThumbnailSyncService();
+  ThumbnailSyncService? _thumbnail;
+
+  /// Supabase 클라이언트 — 지연 초기화.
+  ///
+  /// 백그라운드 isolate(main.dart의 backgroundMain)에서는 `Supabase.initialize()`가
+  /// 호출되지 않으므로, 생성 시점에 `Supabase.instance`에 접근하면 크래시한다.
+  /// (supabase_flutter는 미초기화 시 AssertionError/NoSuchMethodError를 던진다.)
+  /// 따라서 사용 시점에 최초 1회만 접근하고, 초기화되지 않은 환경에서는 null을
+  /// 반환하여 동기화를 조용히 건너뛴다.
+  SupabaseClient? _client;
+
+  SupabaseClient? get _clientOrNull {
+    if (_client != null) return _client;
+    try {
+      _client = Supabase.instance.client;
+    } catch (_) {
+      // Supabase 미초기화 (백그라운드 isolate 등) — 동기화 비활성으로 진행
+      _client = null;
+    }
+    return _client;
+  }
+
+  /// 썸네일 서비스 — 지연 생성.
+  /// ThumbnailSyncService 생성자도 Supabase.instance에 접근하므로,
+  /// 동기화가 실제로 가능한 시점에만 생성한다.
+  ThumbnailSyncService get _thumbnailService =>
+      _thumbnail ??= ThumbnailSyncService();
 
   /// debouncing용 타이머 맵 (bookId → Timer)
   final Map<String, Timer> _debounceTimers = {};
@@ -41,18 +66,35 @@ class SyncService {
 
   /// 동기화 가능 여부: 현재 사용자가 Supabase Auth 세션을 가지고 있고
   /// provider가 google인지 확인. 비로그인/익명이면 false.
+  ///
+  /// Supabase 미초기화 환경(백그라운드 isolate 등)에서는 예외 없이 false 반환.
   bool get _canSync {
-    final user = _client.auth.currentUser;
-    if (user == null) {
+    try {
+      final client = _clientOrNull;
+      if (client == null) {
+        return false;
+      }
+      final user = client.auth.currentUser;
+      if (user == null) {
+        return false;
+      }
+      // provider 확인 — appMetadata에서 'provider' 값이 'google'인지 검사
+      final provider = user.appMetadata['provider'];
+      return provider == 'google';
+    } catch (_) {
       return false;
     }
-    // provider 확인 — appMetadata에서 'provider' 값이 'google'인지 검사
-    final provider = user.appMetadata['provider'];
-    return provider == 'google';
   }
 
   /// 현재 로그인 사용자의 uid.
-  String? get _currentUserId => _client.auth.currentUser?.id;
+  /// Supabase 미초기화/미로그인 시 null.
+  String? get _currentUserId {
+    try {
+      return _clientOrNull?.auth.currentUser?.id;
+    } catch (_) {
+      return null;
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Push (로컬 → 원격)
@@ -72,7 +114,7 @@ class SyncService {
       // thumbnail_url이 없고 로컬 파일이 있으면 업로드 시도
       String? thumbnailUrl = book.thumbnailUrl;
       if (thumbnailUrl == null && book.coverThumbnailPath.isNotEmpty) {
-        thumbnailUrl = await _thumbnail.uploadThumbnail(book, uid);
+        thumbnailUrl = await _thumbnailService.uploadThumbnail(book, uid);
       }
 
       // upsert용 데이터 맵 (snake_case — Supabase 스키마와 일치)
@@ -89,7 +131,7 @@ class SyncService {
         'updated_at': book.updatedAt?.toUtc().toIso8601String() ?? now,
       };
 
-      await _client.from('books').upsert(data, onConflict: 'book_id');
+      await _clientOrNull!.from('books').upsert(data, onConflict: 'book_id');
       debugPrint('[SyncService] push 성공: ${book.bookId}');
     } catch (e) {
       debugPrint('[SyncService] push 실패, 큐에 저장: ${book.bookId} — $e');
@@ -108,10 +150,11 @@ class SyncService {
     final uid = _currentUserId!;
     try {
       final now = DateTime.now().toUtc().toIso8601String();
-      await _client.from('books').update({
-        'deleted_at': now,
-        'updated_at': now,
-      }).eq('book_id', bookId).eq('user_id', uid);
+      await _clientOrNull!
+          .from('books')
+          .update({'deleted_at': now, 'updated_at': now})
+          .eq('book_id', bookId)
+          .eq('user_id', uid);
       debugPrint('[SyncService] delete push 성공: $bookId');
     } catch (e) {
       debugPrint('[SyncService] delete push 실패, 큐에 저장: $bookId — $e');
@@ -146,7 +189,9 @@ class SyncService {
   /// createdAt/updatedAt은 마지막 로컬 값 유지. soft delete는 deletedAt으로 표현.
   Future<void> pushMemo(Memo memo) async {
     if (!_canSync) {
-      debugPrint('[SyncService] 동기화 불가 (비로그인/익명) — pushMemo 생략: ${memo.memoId}');
+      debugPrint(
+        '[SyncService] 동기화 불가 (비로그인/익명) — pushMemo 생략: ${memo.memoId}',
+      );
       return;
     }
     if (memo.memoId.isEmpty) {
@@ -177,7 +222,7 @@ class SyncService {
         'deleted_at': memo.deletedAt?.toUtc().toIso8601String(),
       };
 
-      await _client.from('memos').upsert(data, onConflict: 'memo_id');
+      await _clientOrNull!.from('memos').upsert(data, onConflict: 'memo_id');
       debugPrint('[SyncService] pushMemo 성공: ${memo.memoId}');
     } catch (e) {
       debugPrint('[SyncService] pushMemo 실패, 큐에 저장: ${memo.memoId} — $e');
@@ -201,10 +246,11 @@ class SyncService {
     final uid = _currentUserId!;
     try {
       final now = DateTime.now().toUtc().toIso8601String();
-      await _client.from('memos').update({
-        'deleted_at': now,
-        'updated_at': now,
-      }).eq('memo_id', memoId).eq('user_id', uid);
+      await _clientOrNull!
+          .from('memos')
+          .update({'deleted_at': now, 'updated_at': now})
+          .eq('memo_id', memoId)
+          .eq('user_id', uid);
       debugPrint('[SyncService] pushMemoDelete 성공: $memoId');
     } catch (e) {
       debugPrint('[SyncService] pushMemoDelete 실패, 큐에 저장: $memoId — $e');
@@ -248,7 +294,7 @@ class SyncService {
 
     final uid = _currentUserId!;
     try {
-      final response = await _client
+      final response = await _clientOrNull!
           .from('books')
           .select()
           .eq('user_id', uid)
@@ -271,7 +317,7 @@ class SyncService {
 
     final uid = _currentUserId!;
     try {
-      final response = await _client
+      final response = await _clientOrNull!
           .from('memos')
           .select()
           .eq('user_id', uid)
@@ -297,6 +343,14 @@ class SyncService {
     }
 
     debugPrint('[SyncService] pullFromSupabase 시작');
+
+    // 로컬이 Single Source of Truth이므로, pull이 로컬을 덮어쓰기 전에
+    // 로컬 변경사항을 먼저 원격에 반영한다.
+    // (트리거 제거 후 클라이언트 updated_at이 존중되므로, push 후 pull에서는
+    //  동일한 내용 + 동일한 updated_at이 유지되어 로컬이 보존된다.)
+    await pushAllLocalMemos();
+    await _pushAllLocalBooks();
+
     final remoteBooks = await pullBooks();
     if (remoteBooks.isEmpty) {
       debugPrint('[SyncService] 원격에 책 없음 — pull 종료');
@@ -309,9 +363,12 @@ class SyncService {
     for (final remoteRow in remoteBooks) {
       final remoteBookId = remoteRow['book_id'] as String;
       final remoteUpdatedAtStr = remoteRow['updated_at'] as String?;
-      final remoteUpdatedAt = remoteUpdatedAtStr != null
-          ? DateTime.tryParse(remoteUpdatedAtStr)
-          : null;
+      // DateTime.isAfter는 내부 UTC 인스턴스 기준 비교이므로
+      // 로컬(로컬 시간대, Z 없음)과 remote(UTC, Z 포함)의 표기가 달라도 올바르다.
+      final remoteUpdatedAt =
+          remoteUpdatedAtStr != null
+              ? DateTime.tryParse(remoteUpdatedAtStr)
+              : null;
 
       // 로컬 책 조회
       final localBook = await _db.getBookById(remoteBookId);
@@ -358,9 +415,10 @@ class SyncService {
       if (remoteMemoId == null || remoteMemoId.isEmpty) continue;
 
       final remoteUpdatedAtStr = remoteRow['updated_at'] as String?;
-      final remoteUpdatedAt = remoteUpdatedAtStr != null
-          ? DateTime.tryParse(remoteUpdatedAtStr)?.toLocal()
-          : null;
+      final remoteUpdatedAt =
+          remoteUpdatedAtStr != null
+              ? DateTime.tryParse(remoteUpdatedAtStr)?.toLocal()
+              : null;
 
       final localMemo = await _db.getMemoByMemoId(remoteMemoId);
 
@@ -369,7 +427,10 @@ class SyncService {
         await _upsertLocalMemoFromRemote(remoteRow, uid);
         debugPrint('[SyncService] 로컬에 메모 추가: $remoteMemoId');
       } else {
-        // 충돌 해결: updated_at 비교
+        // 충돌 해결: updated_at 기반 last-write-wins.
+        // remote가 더 최신일 때만 로컬을 덮어쓰고, 그 외(동일/로컬 최신)에는
+        // 로컬 우선 push. pullFromSupabase가 pull 전 로컬 push를 먼저 수행하므로
+        // 정상 흐름에서는 로컬 내용이 보존된다.
         final localUpdatedAt = localMemo.updatedAt;
         if (remoteUpdatedAt != null &&
             remoteUpdatedAt.isAfter(localUpdatedAt)) {
@@ -408,10 +469,10 @@ class SyncService {
       kakaoLng: (remoteRow['kakao_lng'] as num?)?.toDouble(),
       naverX: (remoteRow['naver_x'] as num?)?.toDouble(),
       naverY: (remoteRow['naver_y'] as num?)?.toDouble(),
-      createdAt: _parseDate(remoteRow['created_at'])?.toLocal() ??
-          DateTime.now(),
-      updatedAt: _parseDate(remoteRow['updated_at'])?.toLocal() ??
-          DateTime.now(),
+      createdAt:
+          _parseDate(remoteRow['created_at'])?.toLocal() ?? DateTime.now(),
+      updatedAt:
+          _parseDate(remoteRow['updated_at'])?.toLocal() ?? DateTime.now(),
       userId: userId,
       deletedAt: _parseDate(remoteRow['deleted_at'])?.toLocal(),
     );
@@ -444,15 +505,18 @@ class SyncService {
     // thumbnail_url이 있고 로컬 파일이 없으면 백그라운드 다운로드
     if (book.thumbnailUrl != null && book.coverThumbnailPath.isEmpty) {
       // 백그라운드에서 다운로드 (완료 대기 안 함)
-      _thumbnail.downloadThumbnail(book).then((localPath) {
-        if (localPath != null) {
-          // 다운로드 완료 후 로컬 coverThumbnailPath 업데이트
-          _db.updateBook(book.copyWith(coverThumbnailPath: localPath));
-          debugPrint('[SyncService] 썸네일 다운로드 후 로컬 경로 업데이트: ${book.bookId}');
-        }
-      }).catchError((e) {
-        debugPrint('[SyncService] 썸네일 다운로드 실패: ${book.bookId} — $e');
-      });
+      _thumbnailService
+          .downloadThumbnail(book)
+          .then((localPath) {
+            if (localPath != null) {
+              // 다운로드 완료 후 로컬 coverThumbnailPath 업데이트
+              _db.updateBook(book.copyWith(coverThumbnailPath: localPath));
+              debugPrint('[SyncService] 썸네일 다운로드 후 로컬 경로 업데이트: ${book.bookId}');
+            }
+          })
+          .catchError((e) {
+            debugPrint('[SyncService] 썸네일 다운로드 실패: ${book.bookId} — $e');
+          });
     }
   }
 
@@ -475,6 +539,23 @@ class SyncService {
       debugPrint('[SyncService] pushAllLocalMemos 완료');
     } catch (e) {
       debugPrint('[SyncService] pushAllLocalMemos 실패: $e');
+    }
+  }
+
+  /// 로컬에 있는 모든 책을 Supabase에 push (백업/초기 업로드).
+  /// pull이 로컬을 덮어쓰기 전에 로컬 데이터를 원격에 반영하기 위해 사용.
+  Future<void> _pushAllLocalBooks() async {
+    if (!_canSync) return;
+
+    try {
+      final books = await _db.getAllBooks();
+      debugPrint('[SyncService] _pushAllLocalBooks: ${books.length}건');
+      for (final book in books) {
+        await pushBook(book);
+      }
+      debugPrint('[SyncService] _pushAllLocalBooks 완료');
+    } catch (e) {
+      debugPrint('[SyncService] _pushAllLocalBooks 실패: $e');
     }
   }
 

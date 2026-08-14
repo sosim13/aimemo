@@ -57,6 +57,32 @@ object AimemoQueue {
 
     fun pendingCount(context: Context): Int = readArray(context).length()
 
+    /// 큐에 쌓인 모든 pending 아이템을 삭제한다.
+    /// 사용자 취소 / 처리 기록 삭제 시 호출되어 멈춰있는 아이템이
+    /// UI에 계속 표시되는 문제를 해결한다.
+    fun clearAll(context: Context) {
+        synchronized(this) {
+            writeArray(context, JSONArray())
+        }
+    }
+
+    /// 지정한 id의 아이템을 큐에서 제거한다.
+    /// backgroundMain이 처리 중 hang되어 markComplete가 호출되지 못한
+    /// 아이템을 다음 시작 시 강제로 제거할 때 사용한다.
+    fun removeById(context: Context, id: String) {
+        synchronized(this) {
+            val array = readArray(context)
+            val next = JSONArray()
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                if (item.optString("id") != id) {
+                    next.put(item)
+                }
+            }
+            writeArray(context, next)
+        }
+    }
+
     private fun readArray(context: Context): JSONArray {
         val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_ITEMS, "[]")

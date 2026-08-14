@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/queue_state.dart';
+import '../services/background_queue_service.dart';
 import '../services/content_processing_service.dart';
 import '../services/database_service.dart';
 import 'memo_detail_screen.dart';
@@ -60,6 +61,9 @@ class _QueueScreenState extends State<QueueScreen> {
 
     if (confirm == true) {
       await _databaseService.clearAllProcessingHistory();
+      // DB 기록만 지우면 2초 폴링이 native pending을 다시 읽어와서
+      // UI에 계속 표시되므로 native 큐도 함께 비운다.
+      await BackgroundQueueService().clearAll();
       await _processingService.loadHistoryIntoState();
     }
   }
@@ -325,7 +329,7 @@ class _QueueScreenState extends State<QueueScreen> {
                         iconSize: 16,
                         icon: const Icon(Icons.close),
                         color: Colors.red[400],
-                        tooltip: '취소',
+                        tooltip: '현재 건 취소 (나머지 큐는 유지)',
                         onPressed: () async {
                           await _processingService.cancelCurrentItem();
                         },

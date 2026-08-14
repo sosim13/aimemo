@@ -35,6 +35,8 @@ class AimemoBackgroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 포그라운드 알림이 살아있도록 보장 (Android 14+ 필수)
+        startForeground(PROCESSING_NOTIFICATION_ID, processingNotification())
         startFlutterWorker()
         return START_STICKY
     }
@@ -49,7 +51,17 @@ class AimemoBackgroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun startFlutterWorker() {
-        if (!running.compareAndSet(false, true)) return
+        // 이미 isolate가 살아있으면 재시작하지 않는다.
+        // 단, engine이 null인데 running=true인 좀비 상태는 강제 리셋.
+        if (flutterEngine == null && running.get()) {
+            android.util.Log.w("AimemoBg", "running=true but engine=null — forcing reset")
+            running.set(false)
+        }
+        if (!running.compareAndSet(false, true)) {
+            android.util.Log.d("AimemoBg", "startFlutterWorker skipped — already running")
+            // 이미 실행중인 isolate가 큐를 처리중이므로 별도 액션 불필요
+            return
+        }
 
         val engine = FlutterEngine(this)
         flutterEngine = engine
@@ -64,6 +76,7 @@ class AimemoBackgroundService : Service() {
             "backgroundMain",
         )
         engine.dartExecutor.executeDartEntrypoint(entrypoint)
+        android.util.Log.d("AimemoBg", "backgroundMain isolate started")
     }
 
     private fun setupChannel(engine: FlutterEngine) {
@@ -93,6 +106,18 @@ class AimemoBackgroundService : Service() {
                         running.set(false)
                         startFlutterWorker()
                     }
+                    result.success(null)
+                }
+                "clearAll" -> {
+                    AimemoQueue.clearAll(this)
+                    // 큐가 비었으니 취소 후 서비스도 종료
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    result.success(null)
+                }
+                "removeById" -> {
+                    val id = call.argument<String>("id")
+                    if (id != null) AimemoQueue.removeById(this, id)
                     result.success(null)
                 }
                 "performOcr" -> {

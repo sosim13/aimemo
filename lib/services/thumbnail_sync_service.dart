@@ -22,7 +22,22 @@ class ThumbnailSyncService {
   factory ThumbnailSyncService() => _instance;
   ThumbnailSyncService._internal();
 
-  final _client = Supabase.instance.client;
+  /// Supabase 클라이언트 — 지연 초기화.
+  ///
+  /// 백그라운드 isolate(main.dart의 backgroundMain)에서는 `Supabase.initialize()`가
+  /// 호출되지 않으므로, 생성 시점에 `Supabase.instance`에 접근하면 크래시한다.
+  /// 사용 시점에 최초 1회만 접근하고, 미초기화 환경에서는 null(동기화 비활성)을 반환.
+  SupabaseClient? _client;
+
+  SupabaseClient? get _clientOrNull {
+    if (_client != null) return _client;
+    try {
+      _client = Supabase.instance.client;
+    } catch (_) {
+      _client = null; // Supabase 미초기화 — 동기화 비활성으로 진행
+    }
+    return _client;
+  }
 
   /// Storage 버킷 이름.
   static const _bucketName = 'book-covers';
@@ -50,6 +65,13 @@ class ThumbnailSyncService {
     final localFile = File(book.coverThumbnailPath);
     if (!await localFile.exists()) {
       debugPrint('[ThumbnailSync] 로컬 썸네일 파일 없음: ${book.coverThumbnailPath}');
+      return null;
+    }
+
+    // Supabase 미초기화(백그라운드 isolate 등) — 업로드 불가
+    final client = _clientOrNull;
+    if (client == null) {
+      debugPrint('[ThumbnailSync] Supabase 미초기화 — 업로드 생략');
       return null;
     }
 
@@ -82,7 +104,9 @@ class ThumbnailSyncService {
       final appDir = await getApplicationDocumentsDirectory();
       final tempFile = File(p.join(appDir.path, 'temp_${book.bookId}.webp'));
       await tempFile.writeAsBytes(encoded);
-      await _client.storage.from(_bucketName).upload(
+      await client.storage
+          .from(_bucketName)
+          .upload(
             storagePath,
             tempFile,
             fileOptions: const FileOptions(
@@ -94,8 +118,9 @@ class ThumbnailSyncService {
       if (await tempFile.exists()) await tempFile.delete();
 
       // 4. public URL 반환
-      final publicUrl =
-          _client.storage.from(_bucketName).getPublicUrl(storagePath);
+      final publicUrl = client.storage
+          .from(_bucketName)
+          .getPublicUrl(storagePath);
       debugPrint('[ThumbnailSync] 업로드 성공: $publicUrl');
       return publicUrl;
     } catch (e) {
@@ -142,6 +167,13 @@ class ThumbnailSyncService {
         return localPath;
       }
 
+      // Supabase 미초기화(백그라운드 isolate 등) — 다운로드 불가
+      final client = _clientOrNull;
+      if (client == null) {
+        debugPrint('[ThumbnailSync] Supabase 미초기화 — 다운로드 생략');
+        return null;
+      }
+
       // 원격에서 다운로드 — publicUrl에서 storage path 추출
       // publicUrl 형태: https://xxxx.supabase.co/storage/v1/object/public/book-covers/{userId}/{bookId}.jpg
       final storagePath = _extractStoragePath(remoteUrl);
@@ -149,8 +181,9 @@ class ThumbnailSyncService {
         debugPrint('[ThumbnailSync] storagePath 추출 실패: $remoteUrl');
         return null;
       }
-      final response =
-          await _client.storage.from(_bucketName).download(storagePath);
+      final response = await client.storage
+          .from(_bucketName)
+          .download(storagePath);
       await localFile.writeAsBytes(response);
 
       debugPrint('[ThumbnailSync] 다운로드 성공: $localPath');

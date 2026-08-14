@@ -87,6 +87,29 @@ class BackgroundQueueService {
     await _channel.invokeMethod<void>('stopServiceIfIdle');
   }
 
+  /// native(Android) SharedPreferences에 저장된 백그라운드 큐를
+  /// 모두 비운다. 처리가 hang된 아이템이 UI에 무한히 남는 현상 방지.
+  /// MainActivity, AimemoBackgroundService 양쪽 채널에 모두 구현되어 있어
+  /// 어느 쪽이 받아도 동작한다.
+  Future<void> clearAll() async {
+    try {
+      await _channel.invokeMethod<void>('clearAll');
+    } on MissingPluginException {
+      // 채널이 아직 연결되지 않았을 때 — 무시
+    } catch (_) {}
+  }
+
+  /// 지정한 id의 아이템만 큐에서 제거한다.
+  /// backgroundMain이 처리 중 hang되어 markComplete를 못 한 아이템을
+  /// 앱 재시작 시 강제 제거할 때 사용한다.
+  Future<void> removeById(String id) async {
+    try {
+      await _channel.invokeMethod<void>('removeById', {'id': id});
+    } on MissingPluginException {
+      // 무시
+    } catch (_) {}
+  }
+
   /// Get the number of pending items in the native queue.
   Future<int> pendingCount() async {
     try {

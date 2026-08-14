@@ -24,7 +24,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 10,
+      version: 11,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -77,6 +77,7 @@ class DatabaseService {
         progress REAL DEFAULT 1.0,
         error TEXT,
         memoTitle TEXT,
+        memoId INTEGER,
         createdAt TEXT NOT NULL,
         completedAt TEXT
       )
@@ -183,6 +184,18 @@ class DatabaseService {
       await db.execute(
         'ALTER TABLE processing_history ADD COLUMN memoId INTEGER',
       );
+    }
+    // version 11: 신규 설치 시 _onCreate의 processing_history CREATE TABLE에
+    // memoId가 누락되어 있었음. 이미 컬럼이 있는 DB(oldVersion<4 경로로 추가된
+    // 경우)는 중복 추가 오류가 나므로 존재 여부를 먼저 확인.
+    if (oldVersion < 11) {
+      final cols = await db.rawQuery('PRAGMA table_info(processing_history)');
+      final hasMemoId = cols.any((c) => c['name'] == 'memoId');
+      if (!hasMemoId) {
+        await db.execute(
+          'ALTER TABLE processing_history ADD COLUMN memoId INTEGER',
+        );
+      }
     }
     if (oldVersion < 5) {
       await db.execute(
