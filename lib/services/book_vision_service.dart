@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:camera/camera.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 import 'package:path/path.dart' as p;
@@ -87,96 +88,160 @@ class BookVisionService {
 
   // ─── Corner detection ─────────────────────────────────────────────
 
-  /// Detects corners from a raw Y-plane (grayscale) bytes from CameraImage.
-  /// This is faster than decoding JPEG because it skips the JPEG decode step.
-  /// [yBytes] is the Y plane bytes, [width] and [height] are the image
-  /// dimensions, [yStride] is the row stride (may be > width due to padding).
+  /// Live-preview entry point: runs the full color-aware corner pipeline on
+  /// a [CameraImage] frame.
+  ///
+  /// Two representations are built from the frame:
+  ///   1. Grayscale from the Y (luminance) plane — the fast luminance path.
+  ///   2. BGR reconstructed from the YUV planes (NV21) — enables
+  ///      chroma-aware edge detection that catches book/background
+  ///      boundaries which differ in *color* (hue/saturation) but have
+  ///      similar brightness. When the frame is not 3-plane YUV (e.g. some
+  ///      non-Android platforms), this falls back to luminance-only.
   ///
   /// [sensorOrientation] is the camera sensor orientation reported by
   /// `CameraDescription.sensorOrientation`. When it is 90 (the typical value
   /// for back cameras on Android phones), the Y plane is rotated 90°
   /// clockwise so the detected corners are in display coordinates — i.e. the
   /// normalized 0~1 output maps directly to the camera preview's width/height.
-  DetectedCorners detectCornersFromYPlane(
-    Uint8List yBytes, int width, int height,
-    {required int yStride, int sensorOrientation = 90}) {
-    return _detectFromYPlane(yBytes, width, height,
-        yStride: yStride, sensorOrientation: sensorOrientation,
-        returnDebug: false).corners;
-  }
-
-  /// Same pipeline as [detectCornersFromYPlane] but additionally returns a
-  /// JPEG-encoded preview of the edge image used for contour detection, so
-  /// the caller can show a small debug overlay on the camera screen. The
-  /// debugImage is `null` when no edge image was produced.
   CornersResult detectCornersWithDebug(
-    Uint8List yBytes, int width, int height,
-    {required int yStride, int sensorOrientation = 90}) {
-    return _detectFromYPlane(yBytes, width, height,
-        yStride: yStride, sensorOrientation: sensorOrientation,
-        returnDebug: true);
+    CameraImage image, {
+    int sensorOrientation = 90,
+  }) {
+    final gray = _yPlaneToGray(image);
+    final bgr = _planesToBgr(image);
+    try {
+      return _detectFromFrame(gray, bgr: bgr,
+          sensorOrientation: sensorOrientation, returnDebug: true);
+    } finally {
+      gray.dispose();
+      bgr?.dispose();
+    }
   }
 
-  /// Shared implementation for both [detectCornersFromYPlane] and
-  /// [detectCornersWithDebug]. See those methods for documentation.
-  CornersResult _detectFromYPlane(
-    Uint8List yBytes, int width, int height,
-    {required int yStride, required int sensorOrientation,
-     required bool returnDebug}) {
-    // Create a single-channel Mat from the Y plane.
-    cv.Mat gray;
-    if (yStride == width) {
-      gray = cv.Mat.fromList(height, width, cv.MatType.CV_8UC1, yBytes);
+  /// Builds a tight single-channel grayscale Mat from the Y (luminance)
+  /// plane, handling row-stride padding.
+  cv.Mat _yPlaneToGray(CameraImage image) {
+    final y = image.planes[0];
+    final w = image.width, h = image.height;
+    if (y.bytesPerRow == w && y.bytes.length >= w * h) {
+      return cv.Mat.fromList(h, w, cv.MatType.CV_8UC1, y.bytes);
+    }
+    final tight = Uint8List(w * h);
+    for (var row = 0; row < h; row++) {
+      tight.setRange(row * w, (row + 1) * w, y.bytes, row * y.bytesPerRow);
+    }
+    return cv.Mat.fromList(h, w, cv.MatType.CV_8UC1, tight);
+  }
+
+  /// Reconstructs a BGR Mat from YUV_420 planes by packing an NV21 buffer
+  /// (Y plane followed by interleaved V/U chroma), then converting with
+  /// OpenCV. Returns `null` when the frame does not provide 3 planes.
+  ///
+  /// The chroma loop reads each plane at `bytesPerPixel` intervals (CameraX
+  /// reports pixelStride=2 for chroma, with the interleaved byte belonging
+  /// to the other channel), so this works for both packed and padded layouts.
+  cv.Mat? _planesToBgr(CameraImage image) {
+    if (image.planes.length < 3) return null;
+    final w = image.width, h = image.height;
+    final y = image.planes[0], u = image.planes[1], v = image.planes[2];
+
+    final nv21 = Uint8List(w * h * 3 ~/ 2);
+
+    // Y plane.
+    if (y.bytesPerRow == w && y.bytes.length >= w * h) {
+      nv21.setRange(0, w * h, y.bytes);
     } else {
-      final tightBytes = Uint8List(width * height);
-      for (var row = 0; row < height; row++) {
-        final srcOffset = row * yStride;
-        final dstOffset = row * width;
-        tightBytes.setRange(dstOffset, dstOffset + width, yBytes, srcOffset);
+      for (var row = 0; row < h; row++) {
+        nv21.setRange(row * w, (row + 1) * w, y.bytes, row * y.bytesPerRow);
       }
-      gray = cv.Mat.fromList(height, width, cv.MatType.CV_8UC1, tightBytes);
     }
 
-    // Rotate the Y plane into display orientation. The camera sensor is
-    // typically mounted 90° clockwise relative to the display on Android, so
-    // rotating the sensor-domain Mat 90° CW makes its coordinate system
-    // match the preview the user sees. Corners are then normalized against
-    // this rotated Mat and map directly to the preview width/height.
-    cv.Mat rotated;
+    // Chroma planes: 4:2:0 subsampling → (w/2) × (h/2) samples.
+    // NV21 layout interleaves V first, then U.
+    final cw = w ~/ 2, ch = h ~/ 2;
+    final uPix = u.bytesPerPixel ?? 1;
+    final vPix = v.bytesPerPixel ?? 1;
+    final chromaBase = w * h;
+    for (var row = 0; row < ch; row++) {
+      final uRow = row * u.bytesPerRow;
+      final vRow = row * v.bytesPerRow;
+      final outRow = chromaBase + row * w;
+      for (var col = 0; col < cw; col++) {
+        final out = outRow + col * 2;
+        nv21[out] = v.bytes[vRow + col * vPix];      // V first
+        nv21[out + 1] = u.bytes[uRow + col * uPix];  // U second
+      }
+    }
+
+    final nv21Mat = cv.Mat.fromList(h * 3 ~/ 2, w, cv.MatType.CV_8UC1, nv21);
+    try {
+      return cv.cvtColor(nv21Mat, cv.COLOR_YUV2BGR_NV21);
+    } finally {
+      nv21Mat.dispose();
+    }
+  }
+
+  /// Rotates [src] into display orientation for [sensorOrientation]. Returns
+  /// a NEW Mat for 90/180/270 and the same Mat for 0 (caller keeps ownership).
+  cv.Mat _rotateForSensor(cv.Mat src, int sensorOrientation) {
     if (sensorOrientation == 90) {
-      rotated = cv.rotate(gray, cv.ROTATE_90_CLOCKWISE);
-      gray.dispose();
-    } else if (sensorOrientation == 180) {
-      rotated = cv.rotate(gray, cv.ROTATE_180);
-      gray.dispose();
-    } else if (sensorOrientation == 270) {
-      rotated = cv.rotate(gray, cv.ROTATE_90_COUNTERCLOCKWISE);
-      gray.dispose();
-    } else {
-      rotated = gray; // 0 (or anything else) — use as-is, no transfer.
+      return cv.rotate(src, cv.ROTATE_90_CLOCKWISE);
+    }
+    if (sensorOrientation == 180) {
+      return cv.rotate(src, cv.ROTATE_180);
+    }
+    if (sensorOrientation == 270) {
+      return cv.rotate(src, cv.ROTATE_90_COUNTERCLOCKWISE);
+    }
+    return src; // 0 (or anything else) — use as-is.
+  }
+
+  /// Shared pipeline for live frames: sensor rotation → downscale → corner
+  /// search. Both [gray] and [bgr] (optional) are in sensor orientation and
+  /// owned by the caller; rotation 90/180/270 creates new Mats owned here.
+  CornersResult _detectFromFrame(
+    cv.Mat gray, {
+    required cv.Mat? bgr,
+    required int sensorOrientation,
+    required bool returnDebug,
+  }) {
+    final needRotate = sensorOrientation == 90 ||
+        sensorOrientation == 180 || sensorOrientation == 270;
+
+    cv.Mat? g = gray;
+    cv.Mat? b = bgr;
+    if (needRotate) {
+      g = _rotateForSensor(gray, sensorOrientation);
+      b = bgr == null ? null : _rotateForSensor(bgr, sensorOrientation);
     }
 
     try {
       // Downscale for processing if too large — keeps edge detection fast
       // without sacrificing accuracy (600px long side is plenty for corners).
-      final longestSide = rotated.width > rotated.height
-          ? rotated.width : rotated.height;
+      final longestSide =
+          g.width > g.height ? g.width : g.height;
       const maxLiveSide = 600;
       if (longestSide > maxLiveSide) {
         final ratio = maxLiveSide / longestSide;
-        final resized = cv.resize(rotated,
-          ((rotated.width * ratio).round(),
-           (rotated.height * ratio).round()),
-          interpolation: cv.INTER_AREA);
+        final size = ((g.width * ratio).round(), (g.height * ratio).round());
+        final resizedGray = cv.resize(g, size, interpolation: cv.INTER_AREA);
+        final resizedBgr =
+            b == null ? null : cv.resize(b, size, interpolation: cv.INTER_AREA);
         try {
-          return _findCornersInGrayMat(resized, returnDebug: returnDebug);
+          return _findCornersInMat(resizedGray,
+              bgr: resizedBgr, returnDebug: returnDebug);
         } finally {
-          resized.dispose();
+          resizedGray.dispose();
+          resizedBgr?.dispose();
         }
       }
-      return _findCornersInGrayMat(rotated, returnDebug: returnDebug);
+      return _findCornersInMat(g, bgr: b, returnDebug: returnDebug);
     } finally {
-      rotated.dispose();
+      if (needRotate) {
+        g.dispose();
+        b?.dispose();
+      }
     }
   }
 
@@ -202,7 +267,7 @@ class BookVisionService {
       try {
         final gray = cv.cvtColor(working, cv.COLOR_BGR2GRAY);
         try {
-          return _findCornersInGrayMat(gray).corners;
+          return _findCornersInMat(gray, bgr: working).corners;
         } finally {
           gray.dispose();
         }
@@ -214,57 +279,38 @@ class BookVisionService {
     }
   }
 
-  /// Runs edge detection → contour → approxPolyDP on a grayscale Mat
-  /// and returns normalized corner coordinates.
+  /// Runs edge detection → contour → approxPolyDP on grayscale (and
+  /// optionally color) Mats and returns normalized corner coordinates.
   ///
-  /// Two independent edge maps are produced and searched:
-  ///   1. Canny edges (+ dilate + morphological close) — original pipeline.
-  ///   2. Adaptive thresholding — robust to uneven lighting on glossy covers.
-  /// The best quadrilateral found across both is returned. Each 4-point
-  /// candidate from `approxPolyDP` must additionally be convex
-  /// (`cv.isContourConvex`); non-convex results are replaced with their
-  /// convex hull so we never accept a concave "quadrilateral".
+  /// Edge sources, searched in two stages:
+  ///   Stage 1 — luminance (fast path, handles strong contrast):
+  ///     1. Canny edges (+ dilate + morphological close) — original pipeline.
+  ///     2. Adaptive thresholding (MEAN_C, C=2) — robust to uneven lighting.
+  ///   Stage 2 — sensitivity sources, only when stage 1 found no confident
+  ///   quad (≤30% of the image area):
+  ///     3. Chroma Canny on the Lab a/b channels (+ dilate + close) — the
+  ///        key fix for book/background pairs with similar *brightness* but
+  ///        different *color*: their boundary is invisible in grayscale but
+  ///        shows up as a step in the a/b channels. Requires [bgr].
+  ///     4. Tight adaptive thresholding (GAUSSIAN_C, C=0) — maximizes
+  ///        sensitivity to subtle brightness differences.
+  ///
+  /// The best quadrilateral found across all searched sources wins (largest
+  /// contour area). Each 4-point candidate from `approxPolyDP` must
+  /// additionally be convex (`cv.isContourConvex`); non-convex results are
+  /// replaced with their convex hull so we never accept a concave
+  /// "quadrilateral".
   ///
   /// When [returnDebug] is true, the morphologically closed Canny edge image
-  /// is JPEG-encoded (quality 80) and returned as `debugImage` for the caller
-  /// to display as a small preview overlay. The closed Mat is always disposed.
-  CornersResult _findCornersInGrayMat(cv.Mat gray, {bool returnDebug = false}) {
-    cv.Mat blurred = cv.gaussianBlur(gray, (5, 5), 0);
-
-    final median = cv.mean(blurred).val[0].toDouble();
-    final lower = (median * 0.66).round().clamp(0, 255).toDouble();
-    final upper = (median * 1.33).round().clamp(0, 255).toDouble();
-    cv.Mat edges = cv.canny(blurred, lower, upper);
-    blurred.dispose();
-
-    cv.Mat dilKernel = cv.getStructuringElement(cv.MORPH_RECT, (3, 3));
-    cv.Mat dilated = cv.dilate(edges, dilKernel);
-    dilKernel.dispose();
-    edges.dispose();
-
-    cv.Mat closeKernel = cv.getStructuringElement(cv.MORPH_RECT, (11, 11));
-    cv.Mat closed = cv.morphologyEx(dilated, cv.MORPH_CLOSE, closeKernel);
-    closeKernel.dispose();
-    dilated.dispose();
-
-    // Encode the closed edge image for the debug overlay before we dispose it.
-    Uint8List? debugImage;
-    if (returnDebug) {
-      final (_, jpgBytes) = cv.imencode('.jpg', closed,
-          params: cv.VecI32.fromList([cv.IMWRITE_JPEG_QUALITY, 80]));
-      debugImage = jpgBytes;
-    }
-
-    // --- Edge source #2: adaptive thresholding ---------------------------
-    // blockSize must be odd and > 1; 11 works well for book-cover scales.
-    final adaptive = cv.adaptiveThreshold(
-      gray, 255, cv.ADAPTIVE_THRESH_MEAN_C, cv.THRESH_BINARY_INV, 11, 2);
-
+  /// (stage 1) is JPEG-encoded (quality 80) and returned as `debugImage` for
+  /// the caller to display as a small preview overlay.
+  CornersResult _findCornersInMat(cv.Mat gray,
+      {cv.Mat? bgr, bool returnDebug = false}) {
     final imageArea = gray.width * gray.height;
     final imgW = gray.width.toDouble();
     final imgH = gray.height.toDouble();
 
-    // Track the best candidate found across both edge sources, scored by
+    // Track the best candidate found across all sources, scored by
     // contour area (closest to a full-cover quad wins).
     double bestArea = 0;
     List<cv.Point>? bestOrdered;
@@ -310,6 +356,29 @@ class BookVisionService {
       }
     }
 
+    // ── Stage 1: luminance edge sources ──────────────────────────────
+    cv.Mat blurred = cv.gaussianBlur(gray, (5, 5), 0);
+    final median = cv.mean(blurred).val[0].toDouble();
+    final lower = (median * 0.66).round().clamp(0, 255).toDouble();
+    final upper = (median * 1.33).round().clamp(0, 255).toDouble();
+    cv.Mat edges = cv.canny(blurred, lower, upper);
+    blurred.dispose();
+
+    final dilKernel = cv.getStructuringElement(cv.MORPH_RECT, (3, 3));
+    final closeKernel = cv.getStructuringElement(cv.MORPH_RECT, (11, 11));
+    cv.Mat dilated = cv.dilate(edges, dilKernel);
+    edges.dispose();
+    cv.Mat closed = cv.morphologyEx(dilated, cv.MORPH_CLOSE, closeKernel);
+    dilated.dispose();
+
+    // Encode the closed edge image for the debug overlay before we dispose.
+    Uint8List? debugImage;
+    if (returnDebug) {
+      final (_, jpgBytes) = cv.imencode('.jpg', closed,
+          params: cv.VecI32.fromList([cv.IMWRITE_JPEG_QUALITY, 80]));
+      debugImage = jpgBytes;
+    }
+
     final (cannyContours, cannyHierarchy) = cv.findContours(
       closed, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE,
     );
@@ -317,12 +386,81 @@ class BookVisionService {
     searchContours(cannyContours);
     cannyHierarchy.dispose();
 
+    final adaptive = cv.adaptiveThreshold(
+      gray, 255, cv.ADAPTIVE_THRESH_MEAN_C, cv.THRESH_BINARY_INV, 11, 2);
     final (adaptiveContours, adaptiveHierarchy) = cv.findContours(
       adaptive, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE,
     );
     adaptive.dispose();
     searchContours(adaptiveContours);
     adaptiveHierarchy.dispose();
+
+    // ── Stage 2: sensitivity sources (subtle color / brightness contrast) ─
+    // Only run when luminance sources did not already find a confident quad
+    // (the common high-contrast case skips this for speed).
+    final confident = bestArea > imageArea * 0.30;
+    if (!confident) {
+      // 3. Chroma edges: Lab a/b channels catch hue/saturation boundaries
+      //    that are invisible in luminance (book vs. similar-brightness floor).
+      if (bgr != null) {
+        final lab = cv.cvtColor(bgr, cv.COLOR_BGR2Lab);
+        final channels = cv.split(lab);
+        try {
+          // split() returns refcounted copies — dispose each channel Mat
+          // individually, then the VecMat frees the vector itself.
+          final a = channels[1];
+          final b = channels[2];
+          final edgeA = cv.canny(a, 15, 45);
+          final edgeB = cv.canny(b, 15, 45);
+          try {
+            final chroma = cv.bitwiseOR(edgeA, edgeB);
+            try {
+              final chromaDilated = cv.dilate(chroma, dilKernel);
+              try {
+                final chromaClosed =
+                    cv.morphologyEx(chromaDilated, cv.MORPH_CLOSE, closeKernel);
+                try {
+                  final (chromaContours, chromaHierarchy) = cv.findContours(
+                    chromaClosed, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE,
+                  );
+                  searchContours(chromaContours);
+                  chromaHierarchy.dispose();
+                } finally {
+                  chromaClosed.dispose();
+                }
+              } finally {
+                chromaDilated.dispose();
+              }
+            } finally {
+              chroma.dispose();
+            }
+          } finally {
+            edgeA.dispose();
+            edgeB.dispose();
+          }
+          a.dispose();
+          b.dispose();
+        } finally {
+          channels.dispose();
+          lab.dispose();
+        }
+      }
+
+      // 4. Tight adaptive threshold: C=0 (nothing subtracted from the local
+      //    mean) makes every pixel that deviates from its neighborhood an
+      //    edge — maximally sensitive to weak brightness steps.
+      final tight = cv.adaptiveThreshold(
+        gray, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 11, 0);
+      final (tightContours, tightHierarchy) = cv.findContours(
+        tight, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE,
+      );
+      tight.dispose();
+      searchContours(tightContours);
+      tightHierarchy.dispose();
+    }
+
+    dilKernel.dispose();
+    closeKernel.dispose();
 
     if (bestOrdered != null && bestOrdered!.length == 4) {
       final o = bestOrdered!;

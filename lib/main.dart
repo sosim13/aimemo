@@ -28,6 +28,7 @@ import 'screens/chat_screen.dart';
 import 'screens/reading/reading_dashboard_screen.dart';
 import 'screens/reading/reading_calendar_screen.dart';
 import 'screens/sync_history_screen.dart';
+import 'widgets/app_bottom_nav_bar.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -48,16 +49,43 @@ void main() async {
   );
   AuthService().init();
 
+  // 메모 목록(로컬 DB)을 먼저 화면에 보여주기 위해, 무거운 초기화보다
+  // runApp을 먼저 호출한다. AI 엔진 로딩·클라우드 동기화 등은
+  // 첫 프레임이 그려진 뒤 백그라운드에서 이어서 진행한다.
+  runApp(const AimemoApp());
+
+  unawaited(_initializeBackgroundServices());
+}
+
+/// 첫 화면(메모 목록) 렌더링을 막지 않도록, 무거운 초기화를 runApp 이후
+/// 백그라운드에서 순차 실행한다.
+/// - FlutterGemma 엔진 등록 + 저장된 온디바이스 모델 로딩 (수 초 이상 소요 가능)
+/// - API 키 최초 1회 시딩
+Future<void> _initializeBackgroundServices() async {
   // Initialize flutter_gemma for on-device LLM inference
   // Register LiteRT-LM engine for .litertlm model support
-  await FlutterGemma.initialize(inferenceEngines: [LiteRtLmEngine()]);
+  try {
+    await FlutterGemma.initialize(inferenceEngines: [LiteRtLmEngine()]);
+  } catch (e) {
+    // ignore: avoid_print
+    print('[main] FlutterGemma 초기화 실패: $e');
+  }
 
   // Initialize database
-  final databaseService = DatabaseService();
-  await databaseService.database; // Pre-initialize
+  try {
+    await DatabaseService().database; // Pre-initialize
+  } catch (e) {
+    // ignore: avoid_print
+    print('[main] DB pre-init 실패: $e');
+  }
 
-  // Initialize LLM service (load saved settings)
-  await LlmService().init();
+  // Initialize LLM service (load saved settings, restore on-device model)
+  try {
+    await LlmService().init();
+  } catch (e) {
+    // ignore: avoid_print
+    print('[main] LlmService 초기화 실패: $e');
+  }
 
   // Initialize API keys if not already stored
   final secureStorage = SecureStorageService();
@@ -78,8 +106,6 @@ void main() async {
       'aNPC4VRfpV8tSgSMI7OtYMwRCfOrNhya6qhRaMQP',
     );
   }
-
-  runApp(const AimemoApp());
 }
 
 @pragma('vm:entry-point')
@@ -257,11 +283,19 @@ class _MainShellState extends State<MainShell> {
   @override
   void initState() {
     super.initState();
+    // 상세 화면(BookDetailScreen 등)에서 하단 바 탭 전환 요청을 받을 핸들러 등록.
+    AppBottomNavBar.onSwitchTabRequested = _onDestinationSelected;
     final cps = ContentProcessingService();
     // Load processing history into queue state on startup
     cps.loadHistoryIntoState();
     // Start periodic polling for new history from background isolate
     cps.startPeriodicRefresh();
+  }
+
+  @override
+  void dispose() {
+    AppBottomNavBar.onSwitchTabRequested = null;
+    super.dispose();
   }
 
   /// 하단 메뉴 탭 인덱스 — 더보기는 항상 4.
@@ -315,39 +349,9 @@ class _MainShellState extends State<MainShell> {
           SettingsScreen(), // 7: 설정
         ],
       ),
-      bottomNavigationBar: SafeArea(
-        top: false,
-        child: NavigationBar(
-          selectedIndex: _navBarIndex,
-          onDestinationSelected: _onDestinationSelected,
-          destinations: const [
-            NavigationDestination(
-              icon: Icon(Icons.home_outlined),
-              selectedIcon: Icon(Icons.home),
-              label: '메모',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.hourglass_bottom_outlined),
-              selectedIcon: Icon(Icons.hourglass_bottom),
-              label: '처리현황',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.smart_toy_outlined),
-              selectedIcon: Icon(Icons.smart_toy),
-              label: 'AI 챗봇',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.map_outlined),
-              selectedIcon: Icon(Icons.map),
-              label: '지도',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.menu_outlined),
-              selectedIcon: Icon(Icons.menu),
-              label: '더보기',
-            ),
-          ],
-        ),
+      bottomNavigationBar: AppBottomNavBar(
+        selectedIndex: _navBarIndex,
+        onDestinationSelected: _onDestinationSelected,
       ),
     );
   }

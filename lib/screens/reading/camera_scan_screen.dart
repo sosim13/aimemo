@@ -65,6 +65,14 @@ class _CameraScanScreenState extends State<CameraScanScreen> {
   List<Offset>? _adjustableCorners;
   Rect? _imageDisplayRect;
 
+  // Display-orientation dimensions of the current live frame (i.e. after the
+  // sensorOrientation rotation inside BookVisionService). The live overlay
+  // maps full-frame normalized corners onto the preview, which is a
+  // *center-crop* of the frame to the screen aspect — these dims drive that
+  // crop mapping. Updated on every processed frame during phase 0.
+  double _frameW = 1;
+  double _frameH = 1;
+
   // Image stream for live corner detection.
   bool _isDetecting = false;
   int _frameCounter = 0;
@@ -139,23 +147,31 @@ class _CameraScanScreenState extends State<CameraScanScreen> {
 
   Future<void> _detectFromCameraImage(CameraImage image) async {
     try {
-      // Convert CameraImage (YUV420) to JPEG bytes.
-      // CameraImage planes: [0]=Y, [1]=U, [2]=V (for Android).
-      // We use the Y plane + U/V to build a JPEG via OpenCV.
-      // Simpler approach: use the Y plane as grayscale for edge detection.
-      final yPlane = image.planes[0];
-      final w = image.width;
-      final h = image.height;
-
-      // The camera's sensorOrientation rotates the Y plane into display
+      // The service builds both a grayscale (Y plane) and a color (NV21 → BGR)
+      // frame from the CameraImage, so chroma-aware edges can catch
+      // book/background boundaries that differ in color but not brightness.
+      //
+      // The camera's sensorOrientation rotates the frame into display
       // orientation inside detectCornersWithDebug, so the normalized 0~1
       // corner coordinates it returns map directly to the preview area.
       final sensorOrientation = _cameraDescription?.sensorOrientation ?? 90;
       final result = BookVisionService().detectCornersWithDebug(
-        yPlane.bytes, w, h,
-        yStride: yPlane.bytesPerRow,
+        image,
         sensorOrientation: sensorOrientation,
       );
+
+      // Record the display-orientation frame dimensions (after the
+      // sensorOrientation rotation) so the overlay can map full-frame
+      // normalized corners onto the center-cropped preview.
+      final w = image.width.toDouble();
+      final h = image.height.toDouble();
+      if (sensorOrientation == 90 || sensorOrientation == 270) {
+        _frameW = h;
+        _frameH = w;
+      } else {
+        _frameW = w;
+        _frameH = h;
+      }
 
       // Update the debug edge preview regardless of detection success so the
       // overlay shows the live edge pipeline.
@@ -357,7 +373,7 @@ class _CameraScanScreenState extends State<CameraScanScreen> {
 
         // Debug edge-pipeline preview (top-right). Only shown when the latest
         // frame produced an edge image. The preview's aspect ratio is
-        // portrait-friendly (160×120) to match a rotated Y plane while staying
+        // portrait-friendly (160×120) to match a rotated frame while staying
         // tiny — it's an aid, not a primary display.
         if (_debugImage != null)
           Positioned(
@@ -419,25 +435,63 @@ class _CameraScanScreenState extends State<CameraScanScreen> {
   Widget _buildLiveCornerOverlay() {
     return IgnorePointer(
       child: LayoutBuilder(builder: (context, constraints) {
-        // The Y plane is rotated to display orientation inside
-        // detectCornersWithDebug, so the normalized 0~1 corner coordinates map
-        // directly to the full preview area — use constraints.biggest (the
-        // whole preview surface) rather than any cropped sub-rect for the
-        // width/height of the corner coordinate space.
-        final size = constraints.biggest;
-        final w = size.width;
-        final h = size.height;
+        // The frame is rotated to display orientation inside
+        // detectCornersWithDebug, so the normalized 0~1 corner coordinates are
+        // relative to the *full* frame (aspect _frameW/_frameH). The camera
+        // preview, however, fills the screen by center-cropping the frame to
+        // the screen aspect (CameraX cover-crop behavior). Mapping the
+        // corners straight onto the screen therefore misplaces them whenever
+        // the frame aspect differs from the screen aspect — which is the
+        // reason the preview guide used to not match the captured still.
+        //
+        // We project each corner through the same center-crop transform the
+        // preview applies, so the guide tracks the book exactly where it is
+        // visible on screen.
+        final screenW = constraints.biggest.width;
+        final screenH = constraints.biggest.height;
         final c = _liveCorners!;
         final pts = [
-          Offset(c.x1 * w, c.y1 * h),
-          Offset(c.x2 * w, c.y2 * h),
-          Offset(c.x3 * w, c.y3 * h),
-          Offset(c.x4 * w, c.y4 * h),
+          _projectFrameToScreen(c.x1, c.y1, screenW, screenH),
+          _projectFrameToScreen(c.x2, c.y2, screenW, screenH),
+          _projectFrameToScreen(c.x3, c.y3, screenW, screenH),
+          _projectFrameToScreen(c.x4, c.y4, screenW, screenH),
         ];
         return CustomPaint(
           painter: _CornerOverlayPainter(pts, c.isDetected),
         );
       }),
+    );
+  }
+
+  /// Maps a full-frame normalized coordinate to screen coordinates through
+  /// the preview's center-crop: the frame is cropped (keeping its center) to
+  /// the screen aspect, then stretched to fill the screen.
+  Offset _projectFrameToScreen(
+      double nx, double ny, double screenW, double screenH) {
+    final frameAspect = _frameW / _frameH;
+    final screenAspect = screenW / screenH;
+
+    final fx = nx * _frameW;
+    final fy = ny * _frameH;
+
+    double vx, vy, vw, vh;
+    if (frameAspect > screenAspect) {
+      // Frame is wider than the screen → crop left/right.
+      vw = screenAspect * _frameH;
+      vh = _frameH;
+      vx = (_frameW - vw) / 2;
+      vy = 0;
+    } else {
+      // Frame is taller than the screen → crop top/bottom.
+      vw = _frameW;
+      vh = _frameW / screenAspect;
+      vx = 0;
+      vy = (_frameH - vh) / 2;
+    }
+
+    return Offset(
+      (fx - vx) / vw * screenW,
+      (fy - vy) / vh * screenH,
     );
   }
 

@@ -9,6 +9,7 @@ import '../../models/book_stats.dart';
 import '../../models/reading_session.dart';
 import '../../services/reading_service.dart';
 import '../../services/database_service.dart';
+import '../../widgets/app_bottom_nav_bar.dart';
 import 'reading_timer_screen.dart';
 
 /// 책 상세 화면.
@@ -122,9 +123,27 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
           ],
         ),
       ),
-      // --- 하단 고정 버튼: 독서 시작 / 이어 읽기 / 다시 읽기 ---
-      bottomNavigationBar: _buildBottomButton(hasActive, activeSession),
+      // --- 하단 고정 버튼: 독서 시작 / 이어 읽기 / 다시 읽기 + 하단 메뉴 바 ---
+      bottomNavigationBar: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildBottomButton(hasActive, activeSession),
+          AppBottomNavBar(
+            // 독서기록/독서달력은 모두 "더보기" 탭 하위 — 해당 탭을 선택된 상태로 표시
+            selectedIndex: AppBottomNavBar.moreTabIndex,
+            onDestinationSelected: _onNavDestinationSelected,
+          ),
+        ],
+      ),
     );
+  }
+
+  /// 하단 메뉴 바에서 탭 선택 시:
+  /// 1. 책 상세 화면을 닫고
+  /// 2. MainShell의 해당 탭으로 전환.
+  void _onNavDestinationSelected(int index) {
+    Navigator.of(context).pop(); // 상세 화면 닫기
+    AppBottomNavBar.onSwitchTabRequested?.call(index);
   }
 
   // ---------------------------------------------------------------------------
@@ -393,18 +412,18 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       icon = Icons.menu_book;
     }
 
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: FilledButton.icon(
-          onPressed: () => _startTimer(hasActive),
-          icon: Icon(icon, size: 20),
-          label: Text(label, style: const TextStyle(fontSize: 16)),
-          style: FilledButton.styleFrom(
-            minimumSize: const Size.fromHeight(52),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
+    // 하단 인셋(홈 인디케이터 등)은 아래 AppBottomNavBar가 처리하므로
+    // 여기서는 패딩만 적용.
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: FilledButton.icon(
+        onPressed: () => _startTimer(hasActive),
+        icon: Icon(icon, size: 20),
+        label: Text(label, style: const TextStyle(fontSize: 16)),
+        style: FilledButton.styleFrom(
+          minimumSize: const Size.fromHeight(52),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
           ),
         ),
       ),

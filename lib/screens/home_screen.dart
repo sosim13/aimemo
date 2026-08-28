@@ -101,8 +101,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _initialize() async {
-    _isAiAvailable = await _llmService.isAvailable();
+    // 메모 목록(로컬 DB)을 먼저 로드해 화면에 표시하고,
+    // AI 가용성 체크(및 이어지는 클라우드 동기화)는 그 이후에 진행한다.
     await _loadMemos();
+    if (!mounted) return;
+    final aiAvailable = await _llmService.isAvailable();
+    if (mounted) {
+      setState(() => _isAiAvailable = aiAvailable);
+    }
   }
 
   Future<void> _checkSharedContent() async {
