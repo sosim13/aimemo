@@ -377,6 +377,61 @@ class DatabaseService {
     return maps.map((map) => Memo.fromMap(map)).toList();
   }
 
+  /// 메모 목록을 페이지 단위로 조회 (무한 스크롤용).
+  /// [category]가 주어지면 해당 카테고리만, [searchQuery]가 주어지면
+  /// 제목/내용/카테고리에 부분 일치하는 것만 DB 레벨에서 필터링해서 반환한다.
+  Future<List<Memo>> getMemosPage({
+    required int limit,
+    required int offset,
+    String? category,
+    String? searchQuery,
+    bool noLocationOnly = false,
+  }) async {
+    final db = await database;
+    final where = StringBuffer('deletedAt IS NULL');
+    final args = <Object?>[];
+
+    if (category != null) {
+      where.write(' AND category = ?');
+      args.add(category);
+    }
+
+    if (searchQuery != null && searchQuery.trim().isNotEmpty) {
+      where.write(' AND (title LIKE ? OR content LIKE ? OR category LIKE ?)');
+      final pattern = '%${searchQuery.trim()}%';
+      args.addAll([pattern, pattern, pattern]);
+    }
+
+    // 지도 좌표(kakaoLat/kakaoLng)가 없는 메모만 — "지도 정보 없는 메모" 필터.
+    if (noLocationOnly) {
+      where.write(' AND (kakaoLat IS NULL OR kakaoLng IS NULL)');
+    }
+
+    final maps = await db.query(
+      'memos',
+      where: where.toString(),
+      whereArgs: args,
+      orderBy: 'createdAt DESC',
+      limit: limit,
+      offset: offset,
+    );
+    return maps.map((map) => Memo.fromMap(map)).toList();
+  }
+
+  /// [category] 카테고리에서 지도 좌표가 없는 메모 전체를 (페이지네이션 없이)
+  /// 반환한다 — "전체 삭제" 같이 필터에 해당하는 모든 항목이 필요한 액션용.
+  Future<List<Memo>> getAllMemosMissingLocation(String category) async {
+    final db = await database;
+    final maps = await db.query(
+      'memos',
+      where:
+          'deletedAt IS NULL AND category = ? AND (kakaoLat IS NULL OR kakaoLng IS NULL)',
+      whereArgs: [category],
+      orderBy: 'createdAt DESC',
+    );
+    return maps.map((map) => Memo.fromMap(map)).toList();
+  }
+
   Future<List<Memo>> getMemosByCategory(String category) async {
     final db = await database;
     final maps = await db.query(

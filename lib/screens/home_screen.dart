@@ -46,6 +46,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _isLoading = true;
   bool _isAiAvailable = false;
 
+  /// 무한 스크롤 페이지네이션 — 한 번에 10개씩만 불러온다.
+  static const _pageSize = 10;
+  bool _hasMore = true;
+  bool _isLoadingMore = false;
+
+  /// 검색어 입력 시 매 글자마다 DB 쿼리를 날리지 않도록 디바운스.
+  Timer? _searchDebounce;
+
+  /// "맛집 & 카페" 카테고리에서만 쓰는 "지도 정보 없는 메모만 보기" 필터.
+  static const _noLocationCategory = '맛집 & 카페';
+  bool _noLocationOnly = false;
+
   /// Simple text search state
   bool _isSearching = false;
   String _searchQuery = '';
@@ -57,6 +69,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _scrollController.addListener(_onScroll);
     _initialize();
 
     // Listen for background processing results to refresh UI
@@ -77,11 +90,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _searchController.dispose();
     _searchFocusNode.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _processingSubscription?.cancel();
+    _searchDebounce?.cancel();
     super.dispose();
   }
 
@@ -137,6 +152,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// 첫 페이지(10개)를 새로 불러온다 — 카테고리/검색 필터가 바뀌었을 때,
+  /// 또는 새로고침(pull-to-refresh)/외부 변경 반영 시 호출.
   Future<void> _loadMemos() async {
     // Save current scroll offset before reload
     final savedOffset =
@@ -144,14 +161,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     setState(() => _isLoading = true);
     try {
-      final memos = await _databaseService.getAllMemos();
       final categoryCounts = await _databaseService.getMemoCountByCategory();
+      final memos = await _databaseService.getMemosPage(
+        limit: _pageSize,
+        offset: 0,
+        category: _selectedCategory,
+        searchQuery: _searchQuery,
+        noLocationOnly: _noLocationOnly,
+      );
       // 독서 기록은 이제 전체메뉴(더보기)에서 접근 — 카테고리 chip에서 제거.
       // books가 '독서' 카테고리에 노출되지 않도록 주입하지 않음.
       if (mounted) {
         setState(() {
           _memos = memos;
           _categoryCounts = categoryCounts;
+          _hasMore = memos.length == _pageSize;
           _isLoading = false;
         });
         // Restore scroll position after the frame renders
@@ -175,26 +199,48 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  List<Memo> get _filteredMemos {
-    var memos = _memos;
-
-    // Category filter
-    if (_selectedCategory != null) {
-      memos = memos.where((m) => m.category == _selectedCategory).toList();
+  /// 목록 끝에 가까워지면 다음 10개를 이어서 불러온다.
+  void _onScroll() {
+    if (!_hasMore || _isLoadingMore || _isLoading) return;
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    if (position.pixels >= position.maxScrollExtent - 300) {
+      _loadMoreMemos();
     }
-
-    // Simple text search filter (title, content, category)
-    if (_searchQuery.isNotEmpty) {
-      final query = _searchQuery.toLowerCase();
-      memos = memos.where((m) =>
-        m.title.toLowerCase().contains(query) ||
-        m.content.toLowerCase().contains(query) ||
-        m.category.toLowerCase().contains(query)
-      ).toList();
-    }
-
-    return memos;
   }
+
+  Future<void> _loadMoreMemos() async {
+    if (_isLoadingMore || !_hasMore) return;
+    setState(() => _isLoadingMore = true);
+    try {
+      final nextPage = await _databaseService.getMemosPage(
+        limit: _pageSize,
+        offset: _memos.length,
+        category: _selectedCategory,
+        searchQuery: _searchQuery,
+        noLocationOnly: _noLocationOnly,
+      );
+      if (mounted) {
+        setState(() {
+          _memos = [..._memos, ...nextPage];
+          _hasMore = nextPage.length == _pageSize;
+          _isLoadingMore = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoadingMore = false);
+      }
+    }
+  }
+
+  /// 카테고리/검색 필터는 이미 DB 쿼리 단계에서 적용되어 있으므로
+  /// 화면에는 로드된 목록을 그대로 보여준다.
+  List<Memo> get _filteredMemos => _memos;
+
+  /// 카테고리 무관, 전체 메모 개수 (검색 필터와도 무관 — 상단 "전체" 칩용).
+  int get _totalMemoCount =>
+      _categoryCounts.values.fold(0, (sum, count) => sum + count);
 
   Future<void> _deleteMemo(Memo memo) async {
     final confirm = await showDialog<bool>(
@@ -224,6 +270,69 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       });
       await _loadMemos();
     }
+  }
+
+  /// "$_noLocationCategory" 카테고리에서 지도 정보(좌표)가 없는 메모를
+  /// 한 번에 모두 삭제한다. 목록에 로드된 것만이 아니라 조건에 맞는 전체를 대상으로 한다.
+  Future<void> _deleteAllNoLocationMemos() async {
+    final targets = await _databaseService.getAllMemosMissingLocation(
+      _noLocationCategory,
+    );
+    if (targets.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('지도 정보가 없는 메모가 없습니다'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('전체 삭제'),
+        content: Text(
+          '지도 정보가 없는 "$_noLocationCategory" 메모 ${targets.length}개를 '
+          '모두 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+
+    setState(() => _isLoading = true);
+    for (final memo in targets) {
+      // 소프트 삭제 — SyncService가 원격에도 반영 (비로그인 시 no-op).
+      await _databaseService.softDeleteMemo(memo.id!);
+      _syncService.pushMemoDelete(memo.memoId).catchError((e) {
+        debugPrint('[Home] pushMemoDelete 오류: $e');
+      });
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${targets.length}개 메모를 삭제했습니다'),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+    await _loadMemos();
   }
 
   @override
@@ -271,13 +380,74 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 children: [
-                  _buildCategoryChip('전체 (${_memos.length})', null),
+                  _buildCategoryChip('전체 (${_totalMemoCount})', null),
                   ..._categoryCounts.entries.map((entry) {
                     return _buildCategoryChip(
                       '${entry.key} (${entry.value})',
                       entry.key,
                     );
                   }),
+                ],
+              ),
+            ),
+
+          // "맛집 & 카페" 카테고리에서만 노출되는 "지도 정보 없음" 필터 + 전체 삭제
+          if (_selectedCategory == _noLocationCategory)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 12, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      onTap: () {
+                        setState(() => _noLocationOnly = !_noLocationOnly);
+                        _loadMemos();
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Row(
+                          children: [
+                            Icon(
+                              _noLocationOnly
+                                  ? Icons.check_box
+                                  : Icons.check_box_outline_blank,
+                              size: 20,
+                              color: _noLocationOnly
+                                  ? Theme.of(context).colorScheme.primary
+                                  : Colors.grey[600],
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              '지도 정보 없는 메모만 보기',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: _noLocationOnly
+                                    ? Theme.of(context).colorScheme.primary
+                                    : Colors.grey[700],
+                                fontWeight: _noLocationOnly
+                                    ? FontWeight.w600
+                                    : FontWeight.normal,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (_noLocationOnly)
+                    TextButton.icon(
+                      onPressed: _deleteAllNoLocationMemos,
+                      icon: const Icon(
+                        Icons.delete_sweep_outlined,
+                        size: 18,
+                        color: Colors.red,
+                      ),
+                      label: const Text(
+                        '전체 삭제',
+                        style: TextStyle(color: Colors.red, fontSize: 13),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -298,7 +468,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           icon: const Icon(Icons.clear, size: 18),
                           onPressed: () {
                             _searchController.clear();
+                            _searchDebounce?.cancel();
                             setState(() => _searchQuery = '');
+                            _loadMemos();
                           },
                         )
                       : null,
@@ -314,6 +486,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 style: const TextStyle(fontSize: 14),
                 onChanged: (value) {
                   setState(() => _searchQuery = value);
+                  _searchDebounce?.cancel();
+                  _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+                    if (mounted) _loadMemos();
+                  });
                 },
               ),
             ),
@@ -328,6 +504,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             icon: Icons.search_off,
                             title: '검색 결과가 없습니다',
                             subtitle: '"$_searchQuery"에 해당하는 메모가 없습니다',
+                          )
+                        : _noLocationOnly
+                        ? const EmptyState(
+                            icon: Icons.location_on_outlined,
+                            title: '지도 정보 없는 메모가 없습니다',
+                            subtitle: '이 카테고리의 메모에는 모두 지도 정보가 있어요',
                           )
                         : _selectedCategory == null
                         ? EmptyState(
@@ -348,8 +530,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         child: ListView.builder(
                           controller: _scrollController,
                           padding: const EdgeInsets.only(top: 8, bottom: 80),
-                          itemCount: _filteredMemos.length,
+                          // 목록 끝에 "더 불러오는 중" 표시용 아이템 1개 추가
+                          // (더 불러올 데이터가 있을 때만).
+                          itemCount:
+                              _filteredMemos.length + (_hasMore ? 1 : 0),
                           itemBuilder: (context, index) {
+                            if (index >= _filteredMemos.length) {
+                              return const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 16),
+                                child: Center(
+                                  child: SizedBox(
+                                    width: 24,
+                                    height: 24,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2.5,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }
                             final memo = _filteredMemos[index];
                             return MemoCard(
                               memo: memo,
@@ -377,7 +576,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         label: Text(label),
         selected: isSelected,
         onSelected: (selected) {
-          setState(() => _selectedCategory = selected ? category : null);
+          final newCategory = selected ? category : null;
+          setState(() {
+            _selectedCategory = newCategory;
+            if (newCategory != _noLocationCategory) {
+              _noLocationOnly = false;
+            }
+          });
+          _loadMemos();
         },
         selectedColor: color.withValues(alpha: 0.2),
         checkmarkColor: color,
@@ -563,6 +769,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _toggleSearch() {
+    final wasSearching = _isSearching && _searchQuery.isNotEmpty;
     setState(() {
       _isSearching = !_isSearching;
       if (!_isSearching) {
@@ -576,6 +783,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         });
       }
     });
+    // 검색어가 있는 상태로 검색창을 닫았다면 필터 없이 다시 로드.
+    if (wasSearching) {
+      _searchDebounce?.cancel();
+      _loadMemos();
+    }
   }
 
   Future<void> _openMemoDetail(Memo memo) async {
