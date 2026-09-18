@@ -280,6 +280,14 @@ class MainShell extends StatefulWidget {
 class _MainShellState extends State<MainShell> {
   int _currentIndex = 0;
 
+  /// 실제로 한 번이라도 선택된 탭의 인덱스 집합.
+  /// IndexedStack은 children을 전부 트리에 올려두기 때문에, 방문하지 않은
+  /// 탭까지 매번 initState()가 실행되어(네이버맵 SDK 초기화, DB 전체 조회 등)
+  /// 앱 시작 시 ANR을 유발했다. 방문한 탭만 실제로 build하고, 나머지는
+  /// 빈 위젯을 반환해 지연 초기화한다. 한 번 방문한 탭은 계속 유지되어
+  /// 상태(스크롤 위치 등)가 보존된다.
+  final Set<int> _builtIndices = {0};
+
   @override
   void initState() {
     super.initState();
@@ -306,14 +314,28 @@ class _MainShellState extends State<MainShell> {
       _showMoreSheet();
       return;
     }
-    setState(() => _currentIndex = index);
+    setState(() {
+      _currentIndex = index;
+      _builtIndices.add(index);
+    });
   }
 
   /// 더보기 모달 시트에서 메뉴 선택 시 호출.
   /// 선택한 화면 인덱스로 전환하되, 하단 메뉴의 더보기 탭이
   /// 선택된 상태로 표시되도록 한다.
   void _selectMoreMenu(int screenIndex) {
-    setState(() => _currentIndex = screenIndex);
+    setState(() {
+      _currentIndex = screenIndex;
+      _builtIndices.add(screenIndex);
+    });
+  }
+
+  /// [index]가 한 번이라도 선택된 적이 있을 때만 실제 화면을 build한다.
+  /// 아직 방문하지 않은 탭은 SizedBox.shrink()를 반환해 initState()
+  /// 실행(네트워크 호출, DB 조회 등)을 미룬다.
+  Widget _lazyTab(int index, Widget Function() builder) {
+    if (!_builtIndices.contains(index)) return const SizedBox.shrink();
+    return builder();
   }
 
   void _showMoreSheet() {
@@ -338,15 +360,15 @@ class _MainShellState extends State<MainShell> {
     return Scaffold(
       body: IndexedStack(
         index: _currentIndex,
-        children: const [
-          HomeScreen(), // 0: 메모
-          QueueScreen(), // 1: 처리현황
-          ChatScreen(), // 2: AI 챗봇
-          MapScreen(), // 3: 지도
-          ReadingDashboardScreen(), // 4: 독서 기록
-          ReadingCalendarScreen(), // 5: 독서 달력
-          SyncHistoryScreen(), // 6: 동기화 이력
-          SettingsScreen(), // 7: 설정
+        children: [
+          const HomeScreen(), // 0: 메모 — 항상 즉시 표시
+          _lazyTab(1, () => const QueueScreen()), // 1: 처리현황
+          _lazyTab(2, () => const ChatScreen()), // 2: AI 챗봇
+          _lazyTab(3, () => const MapScreen()), // 3: 지도
+          _lazyTab(4, () => const ReadingDashboardScreen()), // 4: 독서 기록
+          _lazyTab(5, () => const ReadingCalendarScreen()), // 5: 독서 달력
+          _lazyTab(6, () => const SyncHistoryScreen()), // 6: 동기화 이력
+          _lazyTab(7, () => const SettingsScreen()), // 7: 설정
         ],
       ),
       bottomNavigationBar: AppBottomNavBar(
