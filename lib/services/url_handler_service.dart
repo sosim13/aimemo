@@ -1,17 +1,20 @@
 import 'youtube_service.dart';
 import 'tiktok_service.dart';
+import 'instagram_service.dart';
 
 class ParsedUrl {
   final String originalUrl;
   final String? youtubeVideoId;
   final bool isYouTube;
   final bool isTikTok;
+  final bool isInstagram;
 
   ParsedUrl({
     required this.originalUrl,
     this.youtubeVideoId,
     required this.isYouTube,
     this.isTikTok = false,
+    this.isInstagram = false,
   });
 }
 
@@ -22,18 +25,22 @@ class UrlHandlerService {
 
   final _youtubeService = YouTubeService();
   final _tiktokService = TikTokService();
+  final _instagramService = InstagramService();
 
   /// Parse a shared URL and determine its type
   ParsedUrl parseUrl(String url) {
     final videoId = _youtubeService.extractVideoId(url);
     final isYouTube = videoId != null;
     final isTikTok = !isYouTube && _tiktokService.isTikTokUrl(url);
+    final isInstagram =
+        !isYouTube && !isTikTok && _instagramService.isInstagramUrl(url);
 
     return ParsedUrl(
       originalUrl: url,
       youtubeVideoId: videoId,
       isYouTube: isYouTube,
       isTikTok: isTikTok,
+      isInstagram: isInstagram,
     );
   }
 }

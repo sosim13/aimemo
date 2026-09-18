@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:path_provider/path_provider.dart';
 import 'llm_provider.dart';
 import 'gemma_provider.dart';
@@ -93,6 +94,23 @@ class LlmService {
       sourceUrl: sourceUrl,
       youtubeVideoId: youtubeVideoId,
     );
+  }
+
+  /// 사진(썸네일 등)을 온디바이스 비전 모델로 분석해 텍스트 설명을 만든다.
+  /// 캡션 등 텍스트 정보가 전혀 없는 콘텐츠(예: 캡션 없는 인스타그램 게시물)를
+  /// 요약 파이프라인에 태울 수 있도록 하기 위한 용도.
+  ///
+  /// 비전 분석을 사용할 수 없거나 실패하면 null을 반환한다 — 예외를 던지지
+  /// 않으므로 호출자는 항상 null 케이스를 폴백으로 처리해야 한다.
+  Future<String?> describeImage(Uint8List imageBytes) async {
+    await _ensureModelLoaded();
+    try {
+      return await gemmaProvider.describeImage(imageBytes);
+    } catch (e) {
+      // ignore: avoid_print
+      print('LlmService: describeImage 실패: $e');
+      return null;
+    }
   }
 
   /// Free-form Q&A with current provider

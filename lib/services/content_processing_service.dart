@@ -12,6 +12,7 @@ import 'ai_service.dart';
 import 'url_handler_service.dart';
 import 'youtube_service.dart';
 import 'tiktok_service.dart';
+import 'instagram_service.dart';
 import 'web_page_service.dart';
 import 'category_detector.dart';
 import 'geocoding_service.dart';
@@ -73,6 +74,7 @@ class ContentProcessingService {
 
   final _youtubeService = YouTubeService();
   final _tiktokService = TikTokService();
+  final _instagramService = InstagramService();
   final _webPageService = WebPageService();
   final _urlHandler = UrlHandlerService();
   final _aiService = AiService();
@@ -615,6 +617,28 @@ class ContentProcessingService {
     _emitQueueState();
   }
 
+  /// AI 분석처럼 실제 진행률을 알 수 없는(콜백이 없는) 오래 걸리는 작업이
+  /// 진행되는 동안, 해당 stage 범위 안에서 진행률이 계속 조금씩(체감상
+  /// 10~20%씩) 올라가는 것처럼 보여주는 타이머.
+  /// 실제 작업이 끝나면 호출부에서 다음 단계로 넘어가며 정확한 값으로
+  /// 덮어쓰므로, 여기서는 그 값(stage.maxProgress)에 도달하지 않도록
+  /// 92%까지만 접근시킨다.
+  Timer _startProgressTicker(
+    ProcessingStage stage,
+    String statusText,
+    void Function(ProcessingStage, String, {double? progress}) updateProgress,
+  ) {
+    var current = stage.minProgress;
+    final cap =
+        stage.minProgress + (stage.maxProgress - stage.minProgress) * 0.92;
+    return Timer.periodic(const Duration(milliseconds: 600), (_) {
+      final remaining = cap - current;
+      if (remaining <= 0.001) return;
+      current += remaining * 0.15;
+      updateProgress(stage, statusText, progress: current);
+    });
+  }
+
   /// Convenience: enqueue a URL for background processing.
   void enqueueUrl(String url) {
     enqueue(ProcessingItem(content: url, type: ContentType.url));
@@ -672,6 +696,8 @@ class ContentProcessingService {
       return _processYouTube(parsed.youtubeVideoId!, url);
     } else if (parsed.isTikTok) {
       return _processTikTok(parsed.originalUrl);
+    } else if (parsed.isInstagram) {
+      return _processInstagram(parsed.originalUrl);
     } else {
       return _processWebPage(url);
     }
@@ -708,11 +734,16 @@ class ContentProcessingService {
     );
 
     try {
+      final progressTicker = _startProgressTicker(
+        ProcessingStage.analyzing,
+        'AI 요약 중',
+        _updateProgress,
+      );
       final result = await _aiService.analyzeContent(
         content: extractedContent,
         sourceUrl: url,
         youtubeVideoId: videoId,
-      );
+      ).whenComplete(progressTicker.cancel);
 
       // Stage: saving — persist to DB
       _updateProgress(ProcessingStage.saving, '저장 중');
@@ -779,10 +810,15 @@ class ContentProcessingService {
     );
 
     try {
+      final progressTicker = _startProgressTicker(
+        ProcessingStage.analyzing,
+        'AI 요약 중',
+        _updateProgress,
+      );
       final result = await _aiService.analyzeContent(
         content: extractedContent,
         sourceUrl: url,
-      );
+      ).whenComplete(progressTicker.cancel);
 
       // Stage: saving — persist to DB
       _updateProgress(ProcessingStage.saving, '저장 중');
@@ -844,6 +880,136 @@ class ContentProcessingService {
       return tiktokInfo.title;
     }
   }
+
+  Future<String> _processInstagram(String url) async {
+    await _debug.log('CPS: Instagram URL: $url');
+
+    // Stage: fetchingContent (already set by _processNext)
+
+    final igInfo = await _instagramService.getPostInfo(url);
+    if (igInfo == null) {
+      // 게시물/릴스 URL 형식이 아님 (스토리, 프로필 등) — 일반 웹페이지로 처리.
+      return _processWebPage(url);
+    }
+
+    final fallbackTitle =
+        igInfo.username != null
+            ? '@${igInfo.username} 인스타그램 ${igInfo.isReel ? '릴스' : '게시물'}'
+            : '인스타그램 ${igInfo.isReel ? '릴스' : '게시물'}';
+
+    // 캡션을 가져오지 못한 경우(사진/영상 위주 게시물, 또는 스크레이핑 실패) —
+    // AI에게 넘길 실질적인 텍스트가 없으므로 AI 호출 자체를 건너뛴다.
+    //
+    // 참고: 한때 썸네일 이미지를 온디바이스 비전 모델(describeImage)에 보여줘서
+    // 설명을 대신 받아오는 방식을 시도했으나, 이 앱의 모든 처리(URL/이미지/텍스트
+    // 공유)는 항상 백그라운드 포그라운드 서비스(AimemoBackgroundService의 별도
+    // FlutterEngine, backgroundMain 격리)에서 실행된다 — 즉 비전 분석을 "포그라운드
+    // 에서만" 안전하게 돌릴 방법이 이 앱 구조상 없다. 실제로 이 기능을 켠 직후
+    // Supabase debug_logs/processing_history에 NotInitializedError / "Gemma
+    // 엔진이 초기화되지 않았습니다" 같은 엔진 상태 오류가 기록됐고, 사용자가
+    // 겪은 "디바이스 케어 오류 감지"도 시점이 일치한다 — 이미 로드된 텍스트
+    // 모델이 있는 상태에서 supportImage:true로 두 번째 모델 인스턴스를 백그라운드
+    // 서비스 안에서 새로 띄우는 게 리소스 경합/네이티브 엔진 불안정을 일으킨
+    // 것으로 보인다. 그래서 자동 비전 분석은 비활성화하고, 캡션이 없으면
+    // 안전하게 "기타"로 저장한다(이미지 OCR에서 텍스트를 못 찾았을 때와 동일).
+    if (!igInfo.hasCaption) {
+      await _debug.log('CPS: Instagram 캡션 없음, AI 분석 생략하고 기타로 저장');
+      _updateProgress(ProcessingStage.saving, '저장 중');
+      await _insertMemo(
+        Memo(
+          title: fallbackTitle,
+          content:
+              '📷 인스타그램 ${igInfo.isReel ? '릴스' : '게시물'}가 공유되었습니다.\n\n'
+              '이 게시물에서 캡션 텍스트를 가져오지 못해 자동 요약할 수 없습니다.',
+          category: '기타',
+          sourceUrl: url,
+          thumbnailUrl: igInfo.thumbnailUrl,
+        ),
+      );
+      await _debug.log('CPS: Instagram memo saved (no caption)');
+      return fallbackTitle;
+    }
+
+    final contentForAi = igInfo.buildContentForAi();
+
+    // Stage: analyzing — AI analysis
+    _updateProgress(
+      ProcessingStage.analyzing,
+      'AI 요약 중',
+      progress: ProcessingStage.analyzing.minProgress,
+    );
+
+    try {
+      final progressTicker = _startProgressTicker(
+        ProcessingStage.analyzing,
+        'AI 요약 중',
+        _updateProgress,
+      );
+      final result = await _aiService.analyzeContent(
+        content: contentForAi,
+        sourceUrl: url,
+      ).whenComplete(progressTicker.cancel);
+
+      // Stage: saving — persist to DB
+      _updateProgress(ProcessingStage.saving, '저장 중');
+
+      final title = result.title.isNotEmpty ? result.title : fallbackTitle;
+      final searchKeyword =
+          result.address.isEmpty
+              ? extractSearchKeyword(
+                result.content.isNotEmpty ? result.content : contentForAi,
+              )
+              : null;
+      await _insertMemo(
+        Memo(
+          title: title,
+          content:
+              result.content.isNotEmpty ? result.content : contentForAi,
+          category: result.category.isNotEmpty ? result.category : '기타',
+          address: result.address.isNotEmpty ? result.address : null,
+          searchKeyword: searchKeyword,
+          sourceUrl: url,
+          thumbnailUrl: igInfo.thumbnailUrl,
+        ),
+      );
+      await _debug.log('CPS: Instagram memo saved');
+      return title;
+    } catch (e) {
+      await _debug.log('CPS: Instagram AI failed ($e), saving fallback');
+      _updateProgress(ProcessingStage.saving, '저장 중');
+
+      String? fallbackAddress;
+      final addressMatch = _roadAddressPattern.firstMatch(contentForAi);
+      if (addressMatch != null) {
+        fallbackAddress = addressMatch.group(0)!.trim();
+      }
+      if (fallbackAddress == null) {
+        final landMatch = _landAddressPattern.firstMatch(contentForAi);
+        if (landMatch != null) {
+          fallbackAddress = landMatch.group(0)!.trim();
+        }
+      }
+
+      final fallbackKeyword =
+          fallbackAddress == null
+              ? extractSearchKeyword(contentForAi)
+              : null;
+
+      await _insertMemo(
+        Memo(
+          title: fallbackTitle,
+          content: contentForAi,
+          category: '기타',
+          address: fallbackAddress,
+          searchKeyword: fallbackKeyword,
+          sourceUrl: url,
+          thumbnailUrl: igInfo.thumbnailUrl,
+        ),
+      );
+      return fallbackTitle;
+    }
+  }
+
 
   Future<String> _processWebPage(String url) async {
     await _debug.log('CPS: Web page: $url');
@@ -918,10 +1084,15 @@ class ContentProcessingService {
     );
 
     try {
+      final progressTicker = _startProgressTicker(
+        ProcessingStage.analyzing,
+        'AI 요약 중',
+        _updateProgress,
+      );
       final result = await _aiService.analyzeContent(
         content: aiContent,
         sourceUrl: url,
-      );
+      ).whenComplete(progressTicker.cancel);
 
       var finalContent =
           result.content.isNotEmpty ? result.content : extractedContent;
@@ -1011,7 +1182,14 @@ class ContentProcessingService {
     _updateProgress(ProcessingStage.analyzing, 'AI 요약 중');
 
     try {
-      final result = await _aiService.analyzeContent(content: content);
+      final progressTicker = _startProgressTicker(
+        ProcessingStage.analyzing,
+        'AI 요약 중',
+        _updateProgress,
+      );
+      final result = await _aiService
+          .analyzeContent(content: content)
+          .whenComplete(progressTicker.cancel);
 
       // Stage: saving — persist to DB
       _updateProgress(ProcessingStage.saving, '저장 중');
@@ -1073,9 +1251,14 @@ class ContentProcessingService {
         // Stage: analyzing — AI analysis
         _updateProgress(ProcessingStage.analyzing, 'AI 요약 중');
         try {
+          final progressTicker = _startProgressTicker(
+            ProcessingStage.analyzing,
+            'AI 요약 중',
+            _updateProgress,
+          );
           final result = await _aiService.analyzeContent(
             content: ocrResult.text!,
-          );
+          ).whenComplete(progressTicker.cancel);
           // Stage: saving — persist to DB
           _updateProgress(ProcessingStage.saving, '저장 중');
           final title = result.title.isNotEmpty ? result.title : '이미지 메모';
@@ -1404,6 +1587,9 @@ class ContentProcessingService {
       } else if (memo.sourceUrl != null &&
           _tiktokService.isTikTokUrl(memo.sourceUrl!)) {
         updated = await _retryTikTok(memo, memo.sourceUrl!);
+      } else if (memo.sourceUrl != null &&
+          _instagramService.isInstagramUrl(memo.sourceUrl!)) {
+        updated = await _retryInstagram(memo, memo.sourceUrl!);
       } else if (memo.sourceUrl != null) {
         updated = await _retryUrl(memo, memo.sourceUrl!);
       } else if (memo.imagePath != null) {
@@ -1484,11 +1670,16 @@ class ContentProcessingService {
       progress: ProcessingStage.analyzing.minProgress,
     );
 
+    final progressTicker = _startProgressTicker(
+      ProcessingStage.analyzing,
+      'AI 재요약 중',
+      _updateRetryProgress,
+    );
     final result = await _aiService.analyzeContent(
       content: extractedContent,
       sourceUrl: url,
       youtubeVideoId: videoId,
-    );
+    ).whenComplete(progressTicker.cancel);
 
     // Stage: saving — persist to DB
     _updateRetryProgress(ProcessingStage.saving, '저장 중');
@@ -1539,10 +1730,15 @@ class ContentProcessingService {
       progress: ProcessingStage.analyzing.minProgress,
     );
 
+    final progressTicker = _startProgressTicker(
+      ProcessingStage.analyzing,
+      'AI 재요약 중',
+      _updateRetryProgress,
+    );
     final result = await _aiService.analyzeContent(
       content: aiContent,
       sourceUrl: url,
-    );
+    ).whenComplete(progressTicker.cancel);
 
     var finalContent =
         result.content.isNotEmpty ? result.content : extractedContent;
@@ -1595,10 +1791,15 @@ class ContentProcessingService {
     );
 
     try {
+      final progressTicker = _startProgressTicker(
+        ProcessingStage.analyzing,
+        'AI 재요약 중',
+        _updateRetryProgress,
+      );
       final result = await _aiService.analyzeContent(
         content: extractedContent,
         sourceUrl: url,
-      );
+      ).whenComplete(progressTicker.cancel);
 
       // Stage: saving — persist to DB
       _updateRetryProgress(ProcessingStage.saving, '저장 중');
@@ -1644,6 +1845,94 @@ class ContentProcessingService {
     }
   }
 
+  /// 인스타그램 URL을 가진 메모의 재시도. 기존 재시도 경로는 Instagram
+  /// 케이스를 구분하지 않고 `_retryUrl`(일반 웹페이지 스크레이핑)로
+  /// 떨어졌는데, 그 경로는 로그인 유도 페이지만 받아와 캡션을 절대
+  /// 못 가져온다 — 최초 처리(`_processInstagram`)와 동일하게 oEmbed/embed
+  /// 페이지/og태그를 순서대로 시도하는 [InstagramService]를 거치도록 한다.
+  Future<Memo> _retryInstagram(Memo memo, String url) async {
+    await _debug.log('CPS: Retry Instagram URL: $url');
+
+    final igInfo = await _instagramService.getPostInfo(url);
+    if (igInfo == null) {
+      // 게시물/릴스 URL 형식이 아님(스토리, 프로필 등) — 일반 웹페이지로 재시도.
+      return _retryUrl(memo, url);
+    }
+
+    // 캡션이 없으면(비전 분석 자동 실행은 비활성화됨 — 이유는 _processInstagram
+    // 주석 참고) 기존 텍스트 기반 재시도로 폴백한다.
+    if (!igInfo.hasCaption) {
+      await _debug.log('CPS: Instagram 재시도 - 캡션 없음, 텍스트 재시도로 폴백');
+      return _retryText(memo);
+    }
+
+    final contentForAi = igInfo.buildContentForAi();
+
+    // Stage: analyzing — AI analysis
+    _updateRetryProgress(
+      ProcessingStage.analyzing,
+      'AI 재요약 중',
+      progress: ProcessingStage.analyzing.minProgress,
+    );
+
+    try {
+      final progressTicker = _startProgressTicker(
+        ProcessingStage.analyzing,
+        'AI 재요약 중',
+        _updateRetryProgress,
+      );
+      final result = await _aiService.analyzeContent(
+        content: contentForAi,
+        sourceUrl: url,
+      ).whenComplete(progressTicker.cancel);
+
+      // Stage: saving — persist to DB
+      _updateRetryProgress(ProcessingStage.saving, '저장 중');
+
+      final fallbackTitle =
+          (igInfo.username != null && igInfo.username!.isNotEmpty)
+              ? '@${igInfo.username} 인스타그램 ${igInfo.isReel ? '릴스' : '게시물'}'
+              : memo.title;
+      final title = result.title.isNotEmpty ? result.title : fallbackTitle;
+      final updated = memo.copyWith(
+        title: title,
+        content: result.content.isNotEmpty ? result.content : contentForAi,
+        category: result.category.isNotEmpty ? result.category : '기타',
+        address: result.address.isNotEmpty ? result.address : memo.address,
+        thumbnailUrl: igInfo.thumbnailUrl ?? memo.thumbnailUrl,
+        updatedAt: DateTime.now(),
+      );
+      await _updateMemo(updated);
+      await _debug.log('CPS: Instagram retry memo saved');
+      return updated;
+    } catch (e) {
+      await _debug.log('CPS: Instagram retry AI failed ($e), saving fallback');
+
+      String? fallbackAddress;
+      final addressMatch = _roadAddressPattern.firstMatch(contentForAi);
+      if (addressMatch != null) {
+        fallbackAddress = addressMatch.group(0)!.trim();
+      }
+      if (fallbackAddress == null) {
+        final landMatch = _landAddressPattern.firstMatch(contentForAi);
+        if (landMatch != null) {
+          fallbackAddress = landMatch.group(0)!.trim();
+        }
+      }
+
+      _updateRetryProgress(ProcessingStage.saving, '저장 중');
+      final updated = memo.copyWith(
+        content: contentForAi,
+        category: '기타',
+        address: fallbackAddress ?? memo.address,
+        thumbnailUrl: igInfo.thumbnailUrl ?? memo.thumbnailUrl,
+        updatedAt: DateTime.now(),
+      );
+      await _updateMemo(updated);
+      return updated;
+    }
+  }
+
   Future<Memo> _retryText(Memo memo) async {
     final content = memo.content;
     if (!await _llmService.isAvailable()) return memo;
@@ -1651,7 +1940,14 @@ class ContentProcessingService {
     // Stage: analyzing — AI analysis
     _updateRetryProgress(ProcessingStage.analyzing, 'AI 재요약 중');
 
-    final result = await _aiService.analyzeContent(content: content);
+    final progressTicker = _startProgressTicker(
+      ProcessingStage.analyzing,
+      'AI 재요약 중',
+      _updateRetryProgress,
+    );
+    final result = await _aiService
+        .analyzeContent(content: content)
+        .whenComplete(progressTicker.cancel);
 
     // Stage: saving — persist to DB
     _updateRetryProgress(ProcessingStage.saving, '저장 중');
@@ -1684,7 +1980,14 @@ class ContentProcessingService {
       // Stage: analyzing — AI analysis
       _updateRetryProgress(ProcessingStage.analyzing, 'AI 재요약 중');
 
-      final result = await _aiService.analyzeContent(content: ocrResult.text!);
+      final progressTicker = _startProgressTicker(
+        ProcessingStage.analyzing,
+        'AI 재요약 중',
+        _updateRetryProgress,
+      );
+      final result = await _aiService
+          .analyzeContent(content: ocrResult.text!)
+          .whenComplete(progressTicker.cancel);
 
       // Stage: saving — persist to DB
       _updateRetryProgress(ProcessingStage.saving, '저장 중');

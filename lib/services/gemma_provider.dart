@@ -377,6 +377,99 @@ class GemmaProvider implements LlmProvider {
     }
   }
 
+  /// ⚠️ 현재 어디서도 호출되지 않는 미사용 메서드다 — 함부로 자동 호출
+  /// 경로(특히 큐 처리)에 연결하지 말 것. 이 앱은 URL/이미지/텍스트
+  /// 공유 처리가 전부 backgroundMain(별도 FlutterEngine, 백그라운드
+  /// 포그라운드 서비스)에서 실행되는데, 이미 텍스트 모델이 로드된
+  /// 상태에서 supportImage:true로 두 번째 모델 인스턴스를 그 안에서
+  /// 새로 띄우면 네이티브 엔진이 불안정해져(NotInitializedError 등)
+  /// 이후 텍스트 분석까지 실패하는 게 실측으로 확인됐다(인스타그램
+  /// 캡션 없는 게시물의 썸네일을 설명시키는 용도로 시도했다가 제거함).
+  /// 다시 쓰려면 최소한 별도 isolate/엔진 분리 없이 안전하게 돌아가는지
+  /// 실기기에서 먼저 검증할 것.
+  ///
+  /// 일반 사진(책 표지가 아닌 임의의 사진)을 보고 한국어로 자연스럽게 설명한다.
+  ///
+  /// [analyzeImage]와 달리 특정 형식(제목/저자)에 얽매이지 않고, 인스타그램
+  /// 게시물처럼 캡션 텍스트가 없어 AI가 참고할 정보가 전혀 없는 경우에
+  /// 사진 내용 자체를 텍스트로 변환해서 이후 요약/카테고리 분류 파이프라인에
+  /// 넣을 수 있도록 하기 위한 용도다.
+  ///
+  /// 비전 모델을 사용할 수 없거나(엔진 미초기화, 이미지 미지원 모델 등)
+  /// 분석 도중 오류가 나면 예외를 던지지 않고 null을 반환한다 — 호출자는
+  /// null을 "이 사진은 설명할 수 없음"으로 취급하고 기존 폴백 동작으로
+  /// 넘어가면 된다.
+  Future<String?> describeImage(Uint8List imageBytes) async {
+    GemmaDiag.logSync('describeImage ENTER (initialized=$_initialized, model=${_model != null})');
+    if (!_initialized || _model == null) {
+      GemmaDiag.logSync('describeImage SKIP: 엔진 미초기화');
+      return null;
+    }
+
+    if (_visionModel == null) {
+      try {
+        _visionModel = await FlutterGemma.getActiveModel(
+          maxTokens: 2048,
+          preferredBackend: PreferredBackend.cpu,
+          supportImage: true,
+          maxNumImages: 1,
+        );
+        GemmaDiag.logSync('describeImage: vision model created OK');
+      } catch (e) {
+        GemmaDiag.logSync('describeImage: vision model creation FAILED: $e');
+        return null;
+      }
+    }
+
+    InferenceModelSession session;
+    try {
+      session = await _visionModel!.createSession(
+        temperature: 0.3,
+        randomSeed: 42,
+        topK: 1,
+      );
+    } catch (e) {
+      GemmaDiag.logSync('describeImage: session creation FAILED: $e');
+      return null;
+    }
+
+    try {
+      await session.addQueryChunk(
+        Message.withImage(
+          text: _buildPhotoDescriptionPrompt(),
+          imageBytes: imageBytes,
+          isUser: true,
+        ),
+      );
+      final response = await session.getResponse();
+      if (_cancelled) {
+        _cancelled = false;
+        return null;
+      }
+      final trimmed = response.trim();
+      if (trimmed.isEmpty) return null;
+      return trimmed;
+    } catch (e) {
+      if (_cancelled) {
+        _cancelled = false;
+      }
+      GemmaDiag.logSync('describeImage error: $e');
+      return null;
+    } finally {
+      await session.close();
+    }
+  }
+
+  String _buildPhotoDescriptionPrompt() {
+    return '''이 사진에 무엇이 보이는지 한국어로 2~3문장으로 자연스럽게 설명해줘.
+
+- 사진 속 인물, 사물, 장소, 분위기, 행동 등 눈에 보이는 내용을 구체적으로 묘사해줘.
+- 사진 안에 글자(캡션, 자막, 워터마크 등)가 보이면 그 내용도 함께 적어줘.
+- 확실하지 않은 내용은 추측해서 단정짓지 말고, 실제로 보이는 것만 설명해줘.
+- 인사말, 제목, 형식 문구 없이 설명 문장만 출력해줘.
+''';
+  }
+
   String _buildBookCoverPrompt() {
     return '''You are a precise book cover OCR assistant. The input image is already cropped to the book cover (OpenCV handled the crop).
 
