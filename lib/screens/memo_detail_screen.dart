@@ -14,6 +14,7 @@ import '../services/category_detector.dart';
 import '../services/geocoding_service.dart';
 import '../services/naver_coord_service.dart';
 import '../services/sync_service.dart';
+import '../services/browser_service.dart';
 import 'memo_map_screen.dart';
 
 class MemoDetailScreen extends StatefulWidget {
@@ -286,7 +287,15 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     );
   }
 
-  Future<void> _openUrl(String url) async {
+  /// 기본 브라우저가 지정돼 있으면 그 브라우저로, 아니면 시스템 기본 동작으로 연다.
+  /// [preferApp]이 true면 (예: YouTube) 기본 브라우저를 건너뛰고 해당 앱으로 연다.
+  Future<void> _openUrl(String url, {bool preferApp = false}) async {
+    if (!preferApp) {
+      final preferred = await BrowserService.getPreferredBrowser();
+      if (preferred != null && await BrowserService.openWith(url, preferred)) {
+        return;
+      }
+    }
     final uri = Uri.tryParse(url);
     if (uri != null) {
       try {
@@ -301,57 +310,141 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     }
   }
 
-  void _showLinkAction(String url) {
+  Future<void> _openWithBrowser(String url, BrowserApp browser) async {
+    final ok = await BrowserService.openWith(url, browser.packageName);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${browser.name}(으)로 열 수 없습니다.')),
+      );
+    }
+  }
+
+  Future<void> _showLinkAction(String url) async {
+    final results = await Future.wait([
+      BrowserService.getInstalledBrowsers(),
+      BrowserService.getPreferredBrowser(),
+    ]);
+    if (!mounted) return;
+    final browsers = results[0] as List<BrowserApp>;
+    String? preferred = results[1] as String?;
+
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 8),
-            // Handle bar
-            Container(
-              width: 32,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Colors.grey[300],
-                borderRadius: BorderRadius.circular(2),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(ctx).size.height * 0.7,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(height: 8),
+                  // Handle bar
+                  Container(
+                    width: 32,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[300],
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    '링크 열기',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
+                  const SizedBox(height: 16),
+                  ListTile(
+                    leading: const Icon(Icons.copy),
+                    title: const Text('클립보드에 복사'),
+                    onTap: () {
+                      Clipboard.setData(ClipboardData(text: url));
+                      Navigator.pop(ctx);
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('링크가 클립보드에 복사되었습니다')),
+                        );
+                      }
+                    },
+                  ),
+                  if (browsers.isEmpty)
+                    ListTile(
+                      leading: const Icon(Icons.open_in_browser),
+                      title: const Text('다른 브라우저에서 열기'),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _openUrl(url);
+                      },
+                    )
+                  else ...[
+                    const Divider(height: 1),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                      child: Row(
+                        children: [
+                          Text(
+                            '브라우저로 열기',
+                            style: Theme.of(context).textTheme.labelLarge,
+                          ),
+                          const Spacer(),
+                          Text(
+                            '☆ 눌러 기본 브라우저 지정',
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(color: Colors.grey[600]),
+                          ),
+                        ],
+                      ),
+                    ),
+                    for (final browser in browsers)
+                      ListTile(
+                        leading: browser.icon != null
+                            ? Image.memory(browser.icon!, width: 32, height: 32)
+                            : const Icon(Icons.public, size: 32),
+                        title: Text(browser.name),
+                        subtitle: browser.packageName == preferred
+                            ? const Text('기본 브라우저')
+                            : null,
+                        trailing: IconButton(
+                          icon: Icon(
+                            browser.packageName == preferred
+                                ? Icons.star
+                                : Icons.star_border,
+                            color: browser.packageName == preferred
+                                ? Colors.amber
+                                : null,
+                          ),
+                          tooltip: browser.packageName == preferred
+                              ? '기본 브라우저 해제'
+                              : '기본 브라우저로 지정',
+                          onPressed: () async {
+                            final next = browser.packageName == preferred
+                                ? null
+                                : browser.packageName;
+                            await BrowserService.setPreferredBrowser(next);
+                            setSheetState(() => preferred = next);
+                          },
+                        ),
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _openWithBrowser(url, browser);
+                        },
+                      ),
+                  ],
+                  const SizedBox(height: 8),
+                ],
               ),
             ),
-            const SizedBox(height: 16),
-            Text(
-              '링크 열기',
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-            ),
-            const SizedBox(height: 16),
-            ListTile(
-              leading: const Icon(Icons.copy),
-              title: const Text('클립보드에 복사'),
-              onTap: () {
-                Clipboard.setData(ClipboardData(text: url));
-                Navigator.pop(ctx);
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('링크가 클립보드에 복사되었습니다')),
-                  );
-                }
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.open_in_browser),
-              title: const Text('다른 브라우저에서 열기'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _openUrl(url);
-              },
-            ),
-            const SizedBox(height: 8),
-          ],
+          ),
         ),
       ),
     );
@@ -776,7 +869,9 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: InkWell(
-        onTap: sourceUrl != null ? () => _openUrl(sourceUrl) : null,
+        onTap: sourceUrl != null
+            ? () => _openUrl(sourceUrl, preferApp: isYoutube)
+            : null,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [

@@ -81,6 +81,12 @@
     </application>
 
     <queries>
+        <!-- 설치된 브라우저 목록 조회 (Android 11+ 패키지 가시성) -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <category android:name="android.intent.category.BROWSABLE"/>
+            <data android:scheme="https"/>
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
