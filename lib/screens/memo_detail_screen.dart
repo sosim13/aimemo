@@ -15,6 +15,7 @@ import '../services/geocoding_service.dart';
 import '../services/naver_coord_service.dart';
 import '../services/sync_service.dart';
 import '../services/browser_service.dart';
+import '../services/youtube_service.dart';
 import 'memo_map_screen.dart';
 
 class MemoDetailScreen extends StatefulWidget {
@@ -39,6 +40,9 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
   late TextEditingController _categoryController;
   late TextEditingController _addressController;
 
+  /// 사용자가 ☆로 지정한 기본 브라우저. 지정돼 있으면 영상 카드도 이 브라우저로 연다.
+  BrowserApp? _preferredBrowser;
+
   @override
   void initState() {
     super.initState();
@@ -47,6 +51,25 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     _categoryController = TextEditingController();
     _addressController = TextEditingController();
     _loadMemo();
+    _loadPreferredBrowser();
+  }
+
+  Future<void> _loadPreferredBrowser() async {
+    final results = await Future.wait([
+      BrowserService.getInstalledBrowsers(),
+      BrowserService.getPreferredBrowser(),
+    ]);
+    if (!mounted) return;
+    _applyPreferredBrowser(
+        results[0] as List<BrowserApp>, results[1] as String?);
+  }
+
+  void _applyPreferredBrowser(List<BrowserApp> browsers, String? packageName) {
+    BrowserApp? match;
+    for (final b in browsers) {
+      if (b.packageName == packageName) match = b;
+    }
+    setState(() => _preferredBrowser = match);
   }
 
   @override
@@ -291,6 +314,8 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
   /// [preferApp]이 true면 (예: YouTube) 기본 브라우저를 건너뛰고 해당 앱으로 연다.
   Future<void> _openUrl(String url, {bool preferApp = false}) async {
     if (!preferApp) {
+      // 쇼츠는 /watch로 열면 브라우저에서 가로 플레이어에 작게 나오므로 /shorts/로 연다.
+      url = await YouTubeService().resolveBrowserUrl(url);
       final preferred = await BrowserService.getPreferredBrowser();
       if (preferred != null && await BrowserService.openWith(url, preferred)) {
         return;
@@ -311,6 +336,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
   }
 
   Future<void> _openWithBrowser(String url, BrowserApp browser) async {
+    url = await YouTubeService().resolveBrowserUrl(url);
     final ok = await BrowserService.openWith(url, browser.packageName);
     if (!ok && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -432,6 +458,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
                                 : browser.packageName;
                             await BrowserService.setPreferredBrowser(next);
                             setSheetState(() => preferred = next);
+                            if (mounted) _applyPreferredBrowser(browsers, next);
                           },
                         ),
                         onTap: () {
@@ -876,13 +903,16 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
     final sourceUrl = isYoutube
         ? 'https://www.youtube.com/watch?v=${memo.youtubeVideoId}'
         : memo.sourceUrl;
+    // 기본 브라우저가 지정돼 있으면 YouTube 앱 대신 그 브라우저로 연다.
+    final browser = _preferredBrowser;
+    final openLabel = browser?.name ?? label;
 
     return Card(
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: InkWell(
         onTap: sourceUrl != null
-            ? () => _openUrl(sourceUrl, preferApp: isYoutube)
+            ? () => _openUrl(sourceUrl, preferApp: isYoutube && browser == null)
             : null,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -917,7 +947,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      '$label에서 영상 보기',
+                      '$openLabel에서 영상 보기',
                       style: const TextStyle(fontWeight: FontWeight.w500),
                     ),
                   ),

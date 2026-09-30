@@ -77,6 +77,47 @@ class YouTubeService {
     return null;
   }
 
+  final Map<String, bool> _shortsCache = {};
+
+  /// URL to open in a web browser. Mobile web lays out the page by URL path,
+  /// not by the video's aspect ratio: a Short opened via /watch shows up
+  /// letterboxed in the 16:9 player, so Shorts must be opened via /shorts/.
+  /// Returns [url] unchanged if it isn't a YouTube video URL.
+  Future<String> resolveBrowserUrl(String url) async {
+    final videoId = extractVideoId(url);
+    if (videoId == null) return url;
+    final shortsUrl = 'https://www.youtube.com/shorts/$videoId';
+    final uri = Uri.tryParse(url);
+    if (uri != null &&
+        uri.pathSegments.isNotEmpty &&
+        uri.pathSegments.first == 'shorts') {
+      return shortsUrl;
+    }
+    return await isShorts(videoId) ? shortsUrl : url;
+  }
+
+  /// YouTube answers /shorts/ID with 200 for a Short and a 303 redirect to
+  /// /watch for a regular video. On network failure, assume a regular video.
+  Future<bool> isShorts(String videoId) async {
+    final cached = _shortsCache[videoId];
+    if (cached != null) return cached;
+    final client = http.Client();
+    try {
+      final request = http.Request(
+          'HEAD', Uri.parse('https://www.youtube.com/shorts/$videoId'))
+        ..followRedirects = false;
+      final response =
+          await client.send(request).timeout(const Duration(seconds: 3));
+      final result = response.statusCode == 200;
+      _shortsCache[videoId] = result;
+      return result;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close();
+    }
+  }
+
   /// Check if a URL is a YouTube URL
   bool isYouTubeUrl(String url) {
     final videoId = extractVideoId(url);
