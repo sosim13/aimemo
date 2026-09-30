@@ -598,8 +598,8 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
               const SizedBox(height: 16),
             ],
 
-            // Source URL
-            if (memo.sourceUrl != null && memo.youtubeVideoId == null && !_isEditing) ...[
+            // Source URL (YouTube memos too — needed for '브라우저에서 열기')
+            if (_linkUrlOf(memo) != null && !_isEditing) ...[
               Card(
                 color: Colors.blue[50],
                 shape: RoundedRectangleBorder(
@@ -612,9 +612,9 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: GestureDetector(
-                          onTap: () => _showLinkAction(memo.sourceUrl!),
+                          onTap: () => _showLinkAction(_linkUrlOf(memo)!),
                           child: Text(
-                            memo.sourceUrl!,
+                            _linkUrlOf(memo)!,
                             style: TextStyle(
                               color: Colors.blue[700],
                               fontSize: 13,
@@ -627,7 +627,7 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
                       ),
                       InkWell(
                         borderRadius: BorderRadius.circular(20),
-                        onTap: () => _openUrl(memo.sourceUrl!),
+                        onTap: () => _openUrl(_linkUrlOf(memo)!),
                         child: Padding(
                           padding: const EdgeInsets.all(4),
                           child: Icon(Icons.open_in_new,
@@ -856,6 +856,18 @@ class _MemoDetailScreenState extends State<MemoDetailScreen> {
         children: spans,
       ),
     );
+  }
+
+  /// Link shown in the source-URL card. Falls back to the YouTube watch URL
+  /// for memos that only stored the video id.
+  String? _linkUrlOf(Memo memo) {
+    if (memo.sourceUrl != null && memo.sourceUrl!.isNotEmpty) {
+      return memo.sourceUrl;
+    }
+    if (memo.youtubeVideoId != null) {
+      return 'https://www.youtube.com/watch?v=${memo.youtubeVideoId}';
+    }
+    return null;
   }
 
   Widget _buildThumbnailSection(BuildContext context, Memo memo) {

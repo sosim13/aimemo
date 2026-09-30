@@ -170,6 +170,19 @@ class AiAnalysisResult {
     return null;
   }
 
+  /// Rejects URLs and anything without a Korean administrative-unit token
+  /// (시/도/군/구/동/읍/면/리/로/길 or a 번지-style number like 123-4).
+  static bool _looksLikeKoreanAddress(String raw) {
+    final lower = raw.toLowerCase();
+    if (lower.contains('://') ||
+        lower.contains('www.') ||
+        RegExp(r'\.(com|net|kr|org|be|io|co)\b').hasMatch(lower)) {
+      return false;
+    }
+    return RegExp(r'[가-힣]+(시|도|군|구|동|읍|면|리|로|길)(\s|\d|$)')
+        .hasMatch(raw);
+  }
+
   factory AiAnalysisResult.fromText(String text,
       {String? sourceUrl,
       String? youtubeVideoId,
@@ -242,17 +255,20 @@ class AiAnalysisResult {
       if (keywords.length > 10) keywords = keywords.take(10).toList();
     }
 
-    // Parse ## 주소 section
-    final addrMatch = RegExp(r'##\s*주소\s*\n(.+?)(?:\n##|\n$|$)',
+    // Parse ## 주소 (or ## 장소 주소) section
+    final addrMatch = RegExp(r'##\s*(?:장소\s*)?주소\s*\n(.+?)(?:\n##|\n$|$)',
             caseSensitive: false, dotAll: true)
         .firstMatch(text);
     if (addrMatch != null) {
       final raw = addrMatch.group(1)!.trim();
-      // Only set if it's not a "없음" / "없습니다" / empty response
+      // Only set if it's not a "없음" / "없습니다" / empty response, and it
+      // looks like a real Korean address. Small local models sometimes read
+      // "주소" as "URL 주소" and copy the source link here.
       if (raw.isNotEmpty &&
           !raw.contains('없음') &&
           !raw.contains('없습니다') &&
-          !raw.contains('정보가 부족')) {
+          !raw.contains('정보가 부족') &&
+          _looksLikeKoreanAddress(raw)) {
         address = raw;
       }
     }
