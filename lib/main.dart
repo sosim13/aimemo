@@ -25,8 +25,6 @@ import 'screens/memo_detail_screen.dart';
 import 'screens/memo_map_screen.dart';
 import 'screens/url_processing_screen.dart';
 import 'screens/chat_screen.dart';
-import 'screens/reading/reading_dashboard_screen.dart';
-import 'screens/reading/reading_calendar_screen.dart';
 import 'screens/sync_history_screen.dart';
 import 'widgets/app_bottom_nav_bar.dart';
 
@@ -266,7 +264,7 @@ Future<void> backgroundMain() async {
 
 /// Main shell with bottom navigation bar.
 /// 하단 5개 탭: 메모, 처리현황, AI 챗봇, 지도, 더보기(menu)
-/// 더보기 탭 선택 시 전체메뉴 모달 시트 표시 (독서기록, 독서달력, 동기화 이력, 설정).
+/// 더보기 탭 선택 시 전체메뉴 모달 시트 표시 (동기화 이력, 설정).
 /// 모달 시트에서 메뉴 선택 시 해당 화면이 IndexedStack에 표시되며
 /// 하단 메뉴는 항상 유지됨.
 /// 향후 메뉴 추가 시 _MoreSheet에 ListTile 추가 + _screenIndex에 인덱스 매핑.
@@ -291,7 +289,7 @@ class _MainShellState extends State<MainShell> {
   @override
   void initState() {
     super.initState();
-    // 상세 화면(BookDetailScreen 등)에서 하단 바 탭 전환 요청을 받을 핸들러 등록.
+    // 상세 화면에서 하단 바 탭 전환 요청을 받을 핸들러 등록.
     AppBottomNavBar.onSwitchTabRequested = _onDestinationSelected;
     final cps = ContentProcessingService();
     // Load processing history into queue state on startup
@@ -349,7 +347,7 @@ class _MainShellState extends State<MainShell> {
   }
 
   /// 하단 메뉴의 선택 인덱스 계산.
-  /// 0~3은 그대로, 4~7(더보기 서브 메뉴)은 모두 4(더보기)로 매핑.
+  /// 0~3은 그대로, 4~5(더보기 서브 메뉴)는 모두 4(더보기)로 매핑.
   int get _navBarIndex {
     if (_currentIndex <= _moreTabIndex) return _currentIndex;
     return _moreTabIndex;
@@ -365,10 +363,8 @@ class _MainShellState extends State<MainShell> {
           _lazyTab(1, () => const QueueScreen()), // 1: 처리현황
           _lazyTab(2, () => const ChatScreen()), // 2: AI 챗봇
           _lazyTab(3, () => const MapScreen()), // 3: 지도
-          _lazyTab(4, () => const ReadingDashboardScreen()), // 4: 독서 기록
-          _lazyTab(5, () => const ReadingCalendarScreen()), // 5: 독서 달력
-          _lazyTab(6, () => const SyncHistoryScreen()), // 6: 동기화 이력
-          _lazyTab(7, () => const SettingsScreen()), // 7: 설정
+          _lazyTab(4, () => const SyncHistoryScreen()), // 4: 동기화 이력
+          _lazyTab(5, () => const SettingsScreen()), // 5: 설정
         ],
       ),
       bottomNavigationBar: AppBottomNavBar(
@@ -382,9 +378,7 @@ class _MainShellState extends State<MainShell> {
 /// 전체메뉴 모달 시트.
 ///
 /// 메뉴 순서 (위에서 아래):
-///   1. 독서 기록
-///   2. 독서 달력
-///   3. 동기화 이력
+///   1. 동기화 이력
 ///   (향후 추가 메뉴는 여기에)
 ///   마지막: 설정  ← 항상 맨 아래
 ///
@@ -429,22 +423,10 @@ class _MoreSheet extends StatelessWidget {
 
           // --- 메뉴 항목들 ---
           ListTile(
-            leading: const Icon(Icons.menu_book_outlined),
-            title: const Text('독서 기록'),
-            trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-            onTap: () => _select(context, 4), // _readingIndex
-          ),
-          ListTile(
-            leading: const Icon(Icons.calendar_month_outlined),
-            title: const Text('독서 달력'),
-            trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-            onTap: () => _select(context, 5), // _calendarIndex
-          ),
-          ListTile(
             leading: const Icon(Icons.sync_outlined),
             title: const Text('동기화 이력'),
             trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-            onTap: () => _select(context, 6), // _syncIndex
+            onTap: () => _select(context, 4), // _syncIndex
           ),
 
           const Divider(height: 1),
@@ -454,7 +436,7 @@ class _MoreSheet extends StatelessWidget {
             leading: const Icon(Icons.settings_outlined),
             title: const Text('설정'),
             trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-            onTap: () => _select(context, 7), // _settingsIndex
+            onTap: () => _select(context, 5), // _settingsIndex
           ),
           const SizedBox(height: 8),
         ],

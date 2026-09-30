@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 /// 앱 하단 5탭 내비게이션 바 (공용 위젯).
 ///
-/// MainShell(홈 셸)과 상세 화면(예: BookDetailScreen)에서 함께 사용하여
+/// MainShell(홈 셸)과 상세 화면에서 함께 사용하여
 /// 상세 화면에서도 하단 메뉴를 유지할 수 있게 한다.
 class AppBottomNavBar extends StatelessWidget {
   /// 현재 선택된 탭 인덱스 (0~4).
@@ -22,7 +22,7 @@ class AppBottomNavBar extends StatelessWidget {
 
   /// MainShell 외부(상세 화면)에서 하단 탭 전환을 요청하기 위한 정적 핸들러.
   ///
-  /// MainShell이 mount될 때 등록되고 dispose 시 해제된다. BookDetailScreen처럼
+  /// MainShell이 mount될 때 등록되고 dispose 시 해제된다. 상세 화면처럼
   /// root Navigator에 push된 화면이 하단 바를 눌렀을 때, pop과 함께 이 핸들러를
   /// 호출하여 MainShell의 탭 인덱스를 변경한다.
   static void Function(int index)? onSwitchTabRequested;

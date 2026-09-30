@@ -11,20 +11,6 @@ class UserCancelledException implements Exception {
   String toString() => message;
 }
 
-/// Result of analyzing a book cover image via Gemma 4 E2B vision.
-class BookVisionResult {
-  /// Recognized book title from the cover. Empty when not recognized.
-  final String title;
-
-  /// Recognized author. Empty string when the cover doesn't show one.
-  final String author;
-
-  BookVisionResult({
-    required this.title,
-    this.author = '',
-  });
-}
-
 /// Model entry for flutter_gemma
 class _GemmaModel {
   final String id;
@@ -310,72 +296,9 @@ class GemmaProvider implements LlmProvider {
   InferenceModelSession? _chatSession;
 
   /// Active inference model configured for multimodal (image) input.
-  /// Lazily created on first [analyzeImage] call and kept alive for the
+  /// Lazily created on first [describeImage] call and kept alive for the
   /// lifetime of the provider so we don't pay the model-load cost twice.
   InferenceModel? _visionModel;
-
-  /// Sends [imageBytes] (JPEG/PNG bytes of a captured book cover) to the
-  /// Gemma 4 E2B model and returns recognized title, author, and the
-  /// bounding box of the book cover area.
-  ///
-  /// Returns null when the model cannot recognize a book at all. Throws on
-  /// unrecoverable engine errors. Falls back to a text-only prompt when the
-  /// active model was not loaded with [supportImage] — in that case the
-  /// bounding box will be empty and the caller should treat the whole
-  /// image as the cover.
-  Future<BookVisionResult?> analyzeImage(Uint8List imageBytes) async {
-    GemmaDiag.logSync('analyzeImage ENTER (model=${_model != null})');
-    if (!_initialized || _model == null) {
-      final msg = 'Gemma 엔진이 초기화되지 않았습니다. 모델을 먼저 선택해주세요.';
-      GemmaDiag.logSync('analyzeImage FAIL: $msg');
-      throw Exception(msg);
-    }
-
-    // Lazily create a vision-capable model handle. We don't close the
-    // original _model because it's used for text-only analysis elsewhere.
-    if (_visionModel == null) {
-      try {
-        _visionModel = await FlutterGemma.getActiveModel(
-          maxTokens: 2048,
-          preferredBackend: PreferredBackend.cpu,
-          supportImage: true,
-          maxNumImages: 1,
-        );
-        GemmaDiag.logSync('vision model created OK');
-      } catch (e) {
-        GemmaDiag.logSync('vision model creation FAILED: $e — falling back to text model');
-        _visionModel = _model;
-      }
-    }
-
-    final prompt = _buildBookCoverPrompt();
-    final session = await _visionModel!.createSession(
-      temperature: 0.1,
-      randomSeed: 42,
-      topK: 1,
-    );
-    try {
-      await session.addQueryChunk(
-        Message.withImage(text: prompt, imageBytes: imageBytes, isUser: true),
-      );
-      final response = await session.getResponse();
-      if (_cancelled) {
-        _cancelled = false;
-        throw UserCancelledException();
-      }
-      if (response.trim().isEmpty) return null;
-      return _parseBookVisionResponse(response);
-    } catch (e) {
-      if (_cancelled) {
-        _cancelled = false;
-        throw UserCancelledException();
-      }
-      GemmaDiag.logSync('analyzeImage error: $e');
-      rethrow;
-    } finally {
-      await session.close();
-    }
-  }
 
   /// ⚠️ 현재 어디서도 호출되지 않는 미사용 메서드다 — 함부로 자동 호출
   /// 경로(특히 큐 처리)에 연결하지 말 것. 이 앱은 URL/이미지/텍스트
@@ -388,9 +311,9 @@ class GemmaProvider implements LlmProvider {
   /// 다시 쓰려면 최소한 별도 isolate/엔진 분리 없이 안전하게 돌아가는지
   /// 실기기에서 먼저 검증할 것.
   ///
-  /// 일반 사진(책 표지가 아닌 임의의 사진)을 보고 한국어로 자연스럽게 설명한다.
+  /// 임의의 사진을 보고 한국어로 자연스럽게 설명한다.
   ///
-  /// [analyzeImage]와 달리 특정 형식(제목/저자)에 얽매이지 않고, 인스타그램
+  /// 인스타그램
   /// 게시물처럼 캡션 텍스트가 없어 AI가 참고할 정보가 전혀 없는 경우에
   /// 사진 내용 자체를 텍스트로 변환해서 이후 요약/카테고리 분류 파이프라인에
   /// 넣을 수 있도록 하기 위한 용도다.
@@ -468,77 +391,6 @@ class GemmaProvider implements LlmProvider {
 - 확실하지 않은 내용은 추측해서 단정짓지 말고, 실제로 보이는 것만 설명해줘.
 - 인사말, 제목, 형식 문구 없이 설명 문장만 출력해줘.
 ''';
-  }
-
-  String _buildBookCoverPrompt() {
-    return '''You are a precise book cover OCR assistant. The input image is already cropped to the book cover (OpenCV handled the crop).
-
-Your task: read the EXACT title and author as printed on the cover. Pay close attention to every word — do not skip or merge words. Read carefully between lines.
-
-Output strictly in the following format. Do NOT include any other text, explanation, or commentary.
-
-## 제목
-exact book title as printed (preserve capitalization, punctuation, and all words)
-
-## 저자
-author name as printed (or "알 수 없음" if not visible)
-
-Important:
-- Read EVERY word on the cover. Do not omit prepositions, articles, or short words.
-- Preserve the original language — if the title is in English, output English; if Korean, output Korean.
-- If the cover has a subtitle separated by a colon, include it (e.g., "Title: Subtitle").
-- EXCLUDE marketing phrases that are NOT part of the actual title. Common examples to exclude:
-  "A Novel", "A Novel by", "Bestselling Author", "International Bestseller",
-  "Award-winning", "The #1 Bestseller", "Soon to be a Major Motion Picture",
-  "Now a Netflix Series", "New York Times Bestseller".
-  These are publisher marketing labels, NOT the book's title or subtitle.
-- If the image does not contain a recognizable book cover, output:
-
-## 제목
-알 수 없음
-
-## 저자
-알 수 없음
-''';
-  }
-
-  /// Parses the model's text response into a [BookVisionResult].
-  /// Tolerant of leading/trailing whitespace, missing sections,
-  /// and common model artifacts (markdown bold, quotes, etc.).
-  BookVisionResult? _parseBookVisionResponse(String text) {
-    String title = '';
-    String author = '';
-
-    // Strip markdown bold/italic markers and surrounding quotes.
-    String clean(String s) {
-      return s
-          .replaceAll(RegExp(r'\*+'), '')
-          .replaceAll(RegExp(r'''['"]+|['"]+$'''), '')
-          .trim();
-    }
-
-    final titleMatch = RegExp(r'##\s*제목\s*\n(.+?)(?:\n##|\n$|$)',
-            caseSensitive: false, dotAll: true)
-        .firstMatch(text);
-    if (titleMatch != null) {
-      title = clean(titleMatch.group(1)!);
-      if (title.isEmpty || title.contains('알 수 없음')) return null;
-    } else {
-      return null;
-    }
-
-    final authorMatch = RegExp(r'##\s*저자\s*\n(.+?)(?:\n##|\n$|$)',
-            caseSensitive: false, dotAll: true)
-        .firstMatch(text);
-    if (authorMatch != null) {
-      author = clean(authorMatch.group(1)!);
-      if (author.contains('알 수 없음')) author = '';
-    }
-
-    return BookVisionResult(
-      title: title,
-      author: author,
-    );
   }
 
   @override

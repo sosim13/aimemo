@@ -1,9 +1,7 @@
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
-import '../models/book.dart';
 import '../models/memo.dart';
 import '../models/queue_state.dart';
-import '../models/reading_session.dart';
 
 class DatabaseService {
   static final DatabaseService _instance = DatabaseService._internal();
@@ -88,51 +86,6 @@ class DatabaseService {
 
     await db.execute('''
       CREATE INDEX idx_history_created_at ON processing_history(createdAt)
-    ''');
-
-    // Reading Tracker tables (added in version 8).
-    // version 9에서 동기화용 컬럼(thumbnailUrl, userId, updatedAt, deletedAt) 추가됨.
-    await db.execute('''
-      CREATE TABLE books (
-        bookId TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        author TEXT NOT NULL DEFAULT '',
-        coverThumbnailPath TEXT NOT NULL DEFAULT '',
-        category TEXT NOT NULL DEFAULT '독서',
-        totalReadCount INTEGER NOT NULL DEFAULT 0,
-        thumbnailUrl TEXT,
-        userId TEXT,
-        updatedAt TEXT,
-        deletedAt TEXT
-      )
-    ''');
-
-    await db.execute('''
-      CREATE INDEX idx_books_title ON books(title)
-    ''');
-
-    await db.execute('''
-      CREATE TABLE reading_sessions (
-        sessionId TEXT PRIMARY KEY,
-        bookId TEXT NOT NULL,
-        readRound INTEGER NOT NULL DEFAULT 1,
-        firstStartDate TEXT NOT NULL,
-        completedDate TEXT,
-        accumulatedActiveTime INTEGER NOT NULL DEFAULT 0,
-        status TEXT NOT NULL DEFAULT 'READING',
-        userId TEXT,
-        updatedAt TEXT,
-        deletedAt TEXT,
-        FOREIGN KEY (bookId) REFERENCES books(bookId) ON DELETE CASCADE
-      )
-    ''');
-
-    await db.execute('''
-      CREATE INDEX idx_sessions_bookId ON reading_sessions(bookId)
-    ''');
-
-    await db.execute('''
-      CREATE INDEX idx_sessions_status ON reading_sessions(status)
     ''');
 
     // Sync queue (version 9) — 오프라인 상태에서 Supabase 동기화 실패 시
@@ -632,147 +585,12 @@ class DatabaseService {
   }
 
   // ---------------------------------------------------------------------------
-  // Books CRUD (Reading Tracker)
-  // ---------------------------------------------------------------------------
-
-  Future<int> insertBook(Book book) async {
-    final db = await database;
-    return await db.insert('books', book.toMap(),
-        conflictAlgorithm: ConflictAlgorithm.replace);
-  }
-
-  Future<List<Book>> getAllBooks() async {
-    final db = await database;
-    // 최근에 읽은(수정된) 책이 상단에 오도록 updatedAt DESC로 정렬.
-    // SQLite는 NULLS LAST를 지원하지 않으므로 CASE 식으로 대체.
-    // updatedAt이 null인 구형 데이터는 맨 아래로.
-    final maps = await db.query(
-      'books',
-      orderBy:
-          'CASE WHEN updatedAt IS NULL THEN 1 ELSE 0 END, updatedAt DESC, title ASC',
-    );
-    return maps.map((m) => Book.fromMap(m)).toList();
-  }
-
-  Future<Book?> getBookById(String bookId) async {
-    final db = await database;
-    final maps = await db.query(
-      'books',
-      where: 'bookId = ?',
-      whereArgs: [bookId],
-      limit: 1,
-    );
-    if (maps.isEmpty) return null;
-    return Book.fromMap(maps.first);
-  }
-
-  Future<int> updateBook(Book book) async {
-    final db = await database;
-    return await db.update(
-      'books',
-      book.toMap(),
-      where: 'bookId = ?',
-      whereArgs: [book.bookId],
-    );
-  }
-
-  Future<int> deleteBook(String bookId) async {
-    final db = await database;
-    // Delete dependent sessions first (sqflite doesn't enforce FK CASCADE
-    // unless PRAGMA foreign_keys = ON, which we don't set globally).
-    await db.delete('reading_sessions',
-        where: 'bookId = ?', whereArgs: [bookId]);
-    return await db.delete('books', where: 'bookId = ?', whereArgs: [bookId]);
-  }
-
-  /// 소프트 삭제 — deletedAt 컬럼만 업데이트 (Supabase 동기화와 호환).
-  /// SyncService가 deletedAt이 설정된 책을 remote에서도 soft delete 함.
-  Future<int> softDeleteBook(String bookId) async {
-    final db = await database;
-    return await db.update(
-      'books',
-      {'deletedAt': DateTime.now().toIso8601String()},
-      where: 'bookId = ?',
-      whereArgs: [bookId],
-    );
-  }
-
-  /// deletedAt이 null이 아닌(소프트 삭제된) 책들의 bookId 목록.
-  Future<List<String>> getSoftDeletedBookIds() async {
-    final db = await database;
-    final maps = await db.query(
-      'books',
-      columns: ['bookId'],
-      where: 'deletedAt IS NOT NULL',
-    );
-    return maps.map((m) => m['bookId'] as String).toList();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Reading Sessions CRUD
-  // ---------------------------------------------------------------------------
-
-  Future<int> insertReadingSession(ReadingSession session) async {
-    final db = await database;
-    return await db.insert('reading_sessions', session.toMap(),
-        conflictAlgorithm: ConflictAlgorithm.replace);
-  }
-
-  Future<int> updateReadingSession(ReadingSession session) async {
-    final db = await database;
-    return await db.update(
-      'reading_sessions',
-      session.toMap(),
-      where: 'sessionId = ?',
-      whereArgs: [session.sessionId],
-    );
-  }
-
-  Future<List<ReadingSession>> getReadingSessionsForBook(String bookId) async {
-    final db = await database;
-    final maps = await db.query(
-      'reading_sessions',
-      where: 'bookId = ?',
-      whereArgs: [bookId],
-      orderBy: 'readRound ASC',
-    );
-    return maps.map((m) => ReadingSession.fromMap(m)).toList();
-  }
-
-  /// 모든 독서 세션 조회 — Supabase 동기화(pushAllLocal)용.
-  Future<List<ReadingSession>> getAllReadingSessions() async {
-    final db = await database;
-    // reading_sessions에는 createdAt 컬럼이 없으므로 firstStartDate로 정렬.
-    final maps = await db.query('reading_sessions', orderBy: 'firstStartDate');
-    return maps.map((m) => ReadingSession.fromMap(m)).toList();
-  }
-
-  /// sessionId(UUID)로 세션 조회 — sync_queue 재시도용.
-  Future<ReadingSession?> getReadingSessionById(String sessionId) async {
-    final db = await database;
-    final maps = await db.query(
-      'reading_sessions',
-      where: 'sessionId = ?',
-      whereArgs: [sessionId],
-      limit: 1,
-    );
-    if (maps.isEmpty) return null;
-    return ReadingSession.fromMap(maps.first);
-  }
-
-  Future<int> deleteReadingSession(String sessionId) async {
-    final db = await database;
-    return await db.delete('reading_sessions',
-        where: 'sessionId = ?', whereArgs: [sessionId]);
-  }
-
-  // ---------------------------------------------------------------------------
   // Sync Queue CRUD (version 9) — SyncService가 사용
   // ---------------------------------------------------------------------------
 
   /// 동기화 큐에 항목 추가 (Supabase push 실패 시 호출).
-  /// [entityType]은 'book' 또는 'memo'. 지정 안 하면 'book'으로 간주.
-  /// [entityId]는 해당 엔티티의 식별자(bookId 또는 memoId).
+  /// [entityType]은 'memo' 또는 'processing_history'.
+  /// [entityId]는 해당 엔티티의 식별자. `bookId` 컬럼은 레거시 이름으로 같은 값을 저장.
   Future<int> insertSyncQueue(
     String bookId,
     String operation, {

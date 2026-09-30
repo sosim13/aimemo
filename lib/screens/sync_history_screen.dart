@@ -295,7 +295,11 @@ class _SyncHistoryScreenState extends State<SyncHistoryScreen> {
                         else
                           ..._queueItems.map((item) {
                             final id = item['id'] as int;
-                            final bookId = item['bookId'] as String? ?? '-';
+                            final entityType =
+                                item['entityType'] as String? ?? '-';
+                            final entityId = item['entityId'] as String? ??
+                                item['bookId'] as String? ??
+                                '-';
                             final op = item['operation'] as String? ?? '-';
                             final createdAt =
                                 item['createdAt'] as String? ?? '-';
@@ -307,7 +311,7 @@ class _SyncHistoryScreenState extends State<SyncHistoryScreen> {
                                 color: Colors.orange,
                                 size: 28,
                               ),
-                              title: Text('책 ID: ${_truncate(bookId, 20)}'),
+                              title: Text('$entityType: ${_truncate(entityId, 20)}'),
                               subtitle: Text(
                                   '작업: $op  |  시간: ${_truncate(createdAt, 20)}'),
                               trailing: Text('#$id'),
