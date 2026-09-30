@@ -56,3 +56,6 @@ app.*.map.json
 .env
 # Kotlin compiler sessions
 android/.kotlin/
+
+# OpenCode config (contains API keys)
+opencode.json*
