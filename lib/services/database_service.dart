@@ -22,7 +22,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 12,
+      version: 13,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -309,6 +309,15 @@ class DatabaseService {
       if (!cols.any((c) => c['name'] == 'deletedAt')) {
         await db.execute('ALTER TABLE processing_history ADD COLUMN deletedAt TEXT');
       }
+    }
+    // version 13: 독서 기록 기능 제거 — books/reading_sessions 테이블과
+    // 동기화 큐에 남은 독서 항목 삭제.
+    if (oldVersion < 13) {
+      await db.execute('DROP TABLE IF EXISTS reading_sessions');
+      await db.execute('DROP TABLE IF EXISTS books');
+      await db.execute(
+        "DELETE FROM sync_queue WHERE entityType IN ('book', 'reading_session')",
+      );
     }
   }
 
